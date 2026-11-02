@@ -1,0 +1,9 @@
+.venv/
+out/
+test_data/
+__pycache__/
+*.pyc
+.DS_Store
+tests/
+*.MP4
+*.mp4
