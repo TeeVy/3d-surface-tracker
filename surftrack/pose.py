@@ -31,9 +31,18 @@ class PoseResult:
     R: np.ndarray            # (N,3,3) rotation surface -> caméra
     t: np.ndarray            # (N,3) centre de la surface dans le repère caméra
     size: tuple              # (largeur, hauteur) de la surface, mêmes unités que t
-    focal: float
+    focal: np.ndarray        # (N,) focale en pixels de chaque image (zoom possible)
     reproj_error: np.ndarray  # (N,) erreur de reprojection des coins (px)
     valid: np.ndarray        # (N,) bool
+
+
+def as_focals(focal, n):
+    """Focale par image : un nombre (focale fixe) ou un tableau (zoom) -> tableau (n,)."""
+    return np.broadcast_to(np.asarray(focal, dtype=np.float64), (n,)).copy()
+
+
+def _K(f, width, height):
+    return np.array([[f, 0, width / 2], [0, f, height / 2], [0, 0, 1]])
 
 
 def _unit_square_homographies(corners, cx, cy):
@@ -58,6 +67,7 @@ def _robust_mean(costs):
 
 
 def orthogonality_cost(corner_seq, focal, width, height):
+    corner_seq = corner_seq[np.isfinite(corner_seq).all(axis=(1, 2))]
     Hn = _unit_square_homographies(corner_seq, width / 2, height / 2)
     return _robust_mean(_frame_costs(Hn, focal))
 
@@ -88,10 +98,15 @@ def estimate_focal(corner_seqs_for, width, height):
 
 def estimate_aspect(corners, focal, width, height, valid=None):
     """Rapport largeur/hauteur réel du rectangle."""
-    valid = np.ones(len(corners), bool) if valid is None else valid
+    valid = np.ones(len(corners), bool) if valid is None else valid.copy()
+    valid &= np.isfinite(corners).all(axis=(1, 2))  # images perdues exclues
+    if not valid.any():
+        raise RuntimeError("Aucune image trackée exploitable pour estimer les proportions.")
     Hn = _unit_square_homographies(corners[valid], width / 2, height / 2)
-    a = np.linalg.norm(Hn[:, :, 0] / [focal, focal, 1], axis=1)
-    b = np.linalg.norm(Hn[:, :, 1] / [focal, focal, 1], axis=1)
+    F = as_focals(focal, len(corners))[valid]
+    d = np.column_stack([F, F, np.ones_like(F)])
+    a = np.linalg.norm(Hn[:, :, 0] / d, axis=1)
+    b = np.linalg.norm(Hn[:, :, 1] / d, axis=1)
     return float(np.median(a / b))
 
 
@@ -101,10 +116,10 @@ def _object_points(w, h):
 
 def solve_poses(corners, focal, width, height, aspect, ref_index, valid=None):
     """Pose 3D par image. Échelle choisie pour que la surface soit à la distance
-    `focal` de la caméra sur l'image de référence (≈ 1 unité = 1 pixel dans AE)."""
+    focale de la caméra sur l'image de référence (≈ 1 unité = 1 pixel dans AE)."""
     n = len(corners)
     valid = np.ones(n, bool) if valid is None else valid.copy()
-    K = np.array([[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]])
+    focal = as_focals(focal, n)
     obj = _object_points(aspect, 1.0)
 
     R = np.full((n, 3, 3), np.nan)
@@ -112,7 +127,7 @@ def solve_poses(corners, focal, width, height, aspect, ref_index, valid=None):
     err = np.full(n, np.nan)
 
     def candidates(i):
-        ok, rvecs, tvecs, errs = cv2.solvePnPGeneric(obj, corners[i].astype(np.float64), K, None,
+        ok, rvecs, tvecs, errs = cv2.solvePnPGeneric(obj, corners[i].astype(np.float64), _K(focal[i], width, height), None,
                                                     flags=cv2.SOLVEPNP_IPPE)
         out = []
         for rv, tv, e in zip(rvecs, tvecs, np.ravel(errs)):
@@ -141,7 +156,7 @@ def solve_poses(corners, focal, width, height, aspect, ref_index, valid=None):
                     valid[i] = False
             i += step
 
-    scale = focal / t[ref_index][2]
+    scale = focal[ref_index] / t[ref_index][2]
     return PoseResult(R, t * scale, (aspect * scale, scale), focal, err, valid)
 
 
@@ -206,13 +221,14 @@ def stabilize_poses(pose: PoseResult, corners, width, height, sigma_frames: floa
         ok[ok] &= pose.valid[idx[ok]]
         w = kernel[ok] / kernel[ok].sum()
         R2[i] = orthonormalize((pose.R[idx[ok]] * w[:, None, None]).sum(axis=0))
-        t2[i] = _translation_for_rotation(R2[i], obj, corners[i], pose.focal, width / 2, height / 2)
+        f = pose.focal[i]
+        t2[i] = _translation_for_rotation(R2[i], obj, corners[i], f, width / 2, height / 2)
         if conics is not None and np.all(np.isfinite(conics[i])):
-            t2[i], err2[i] = _translation_on_rim(R2[i], t2[i], conics[i], pose.focal, width / 2, height / 2,
+            t2[i], err2[i] = _translation_on_rim(R2[i], t2[i], conics[i], f, width / 2, height / 2,
                                                  pose.size[0] / 2)
         else:
             X = obj @ R2[i].T + t2[i]
-            proj = pose.focal * X[:, :2] / X[:, 2:3] + [width / 2, height / 2]
+            proj = f * X[:, :2] / X[:, 2:3] + [width / 2, height / 2]
             err2[i] = float(np.sqrt(np.mean(np.sum((proj - corners[i]) ** 2, axis=1))))
     return PoseResult(R2, t2, pose.size, pose.focal, err2, pose.valid)
 
@@ -223,7 +239,7 @@ def project_corners(pose: PoseResult, width, height):
     out = np.full((len(pose.t), 4, 2), np.nan)
     for i in np.flatnonzero(pose.valid):
         X = obj @ pose.R[i].T + pose.t[i]
-        out[i] = pose.focal * X[:, :2] / X[:, 2:3] + [width / 2, height / 2]
+        out[i] = pose.focal[i] * X[:, :2] / X[:, 2:3] + [width / 2, height / 2]
     return out
 
 
@@ -236,12 +252,12 @@ def solve_disc_poses(conics, homographies, focal, width, height, ref_index, flip
     from .surface import circle_poses_from_ellipse  # import local : évite un import circulaire
 
     n = len(conics)
-    K = np.array([[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]])
-    Ki = np.linalg.inv(K)
+    focal = as_focals(focal, n)
     R = np.full((n, 3, 3), np.nan)
     t = np.full((n, 3), np.nan)
     valid = np.zeros(n, bool)
 
+    K = _K(focal[ref_index], width, height)
     cands = circle_poses_from_ellipse(conics[ref_index], K)
     order = list(ref_order) if ref_order is not None else list(range(len(cands)))
     pick = order[1] if (flip and len(cands) > 1) else order[0]
@@ -252,29 +268,29 @@ def solve_disc_poses(conics, homographies, focal, width, height, ref_index, flip
     a = np.array([c3, c3 + r * u]) @ K.T
     anchors = a[:, :2] / a[:, 2:3]  # 2 points image de référence qui portent la direction u
 
-    def pose_from(c3, nrm, r, H):
-        b = np.column_stack([warp_points_h(H, anchors), np.ones(2)]) @ Ki.T
+    def pose_from(c3, nrm, r, H, f):
+        b = np.column_stack([warp_points_h(H, anchors), np.ones(2)]) @ np.linalg.inv(_K(f, width, height)).T
         X = b * ((nrm @ c3) / (b @ nrm))[:, None]  # rayons ∩ plan du disque
         u = X[1] - X[0]
         u -= (u @ nrm) * nrm
         u /= np.linalg.norm(u)
         return np.column_stack([u, np.cross(nrm, u), nrm]), c3 / r  # rayon unité
 
-    R[ref_index], t[ref_index] = pose_from(c3, nrm, r, homographies[ref_index])
+    R[ref_index], t[ref_index] = pose_from(c3, nrm, r, homographies[ref_index], focal[ref_index])
     valid[ref_index] = True
     for step in (1, -1):
         last_n = nrm
         i = ref_index + step
         while 0 <= i < n:
             if np.all(np.isfinite(conics[i])) and np.all(np.isfinite(homographies[i])):
-                cs = circle_poses_from_ellipse(conics[i], K)
+                cs = circle_poses_from_ellipse(conics[i], _K(focal[i], width, height))
                 c3i, ni, ri = max(cs, key=lambda x: x[1] @ last_n)  # continuité de la normale
-                R[i], t[i] = pose_from(c3i, ni, ri, homographies[i])
+                R[i], t[i] = pose_from(c3i, ni, ri, homographies[i], focal[i])
                 valid[i] = True
                 last_n = ni
             i += step
 
-    scale = focal / t[ref_index][2]
+    scale = focal[ref_index] / t[ref_index][2]
     pose = PoseResult(R, t * scale, (2 * scale, 2 * scale), focal, np.zeros(n), valid)
     return pose, project_corners(pose, width, height)
 

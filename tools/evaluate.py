@@ -42,12 +42,12 @@ def evaluate(video, ref_frame=0, click_noise=1.0, smooth=None, known_focal=False
     jitter = np.abs(np.diff(tilt))
     F = gt["focal"]
     c_gt = F * t_gt[:, :2] / t_gt[:, 2:3]
-    c_est = res.pose.focal * res.pose.t[:, :2] / res.pose.t[:, 2:3]
+    c_est = res.pose.focal[:, None] * res.pose.t[:, :2] / res.pose.t[:, 2:3]
     err2d = np.linalg.norm(c_est - c_gt, axis=1)
     s = t_gt[ref_frame][2] / res.pose.t[ref_frame][2]
     pos = np.linalg.norm(res.pose.t * s - t_gt, axis=1) / np.linalg.norm(t_gt, axis=1)
     return {
-        "img/s": len(t_gt) / dt, "focale %": 100 * (res.pose.focal / F - 1),
+        "img/s": len(t_gt) / dt, "focale %": 100 * (np.median(res.pose.focal) / F - 1),
         "centre 2D moy px": err2d.mean(), "centre 2D max px": err2d.max(),
         "inclinaison moy °": tilt.mean(), "inclinaison max °": tilt.max(),
         "tremblement moy °": jitter.mean(), "position moy %": 100 * pos.mean(),

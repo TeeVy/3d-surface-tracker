@@ -10,7 +10,7 @@ from .video import iter_bgr
 
 def _project(pose, i, pts3, width, height):
     X = pts3 @ pose.R[i].T + pose.t[i]
-    return pose.focal * X[:, :2] / X[:, 2:3] + [width / 2, height / 2]
+    return pose.focal[i] * X[:, :2] / X[:, 2:3] + [width / 2, height / 2]
 
 
 def annotated_frames(video_path, res, pose=None, max_side=1600, label=True):

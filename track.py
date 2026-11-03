@@ -125,7 +125,7 @@ def main():
     write_jsx(jsx, build_ae_data(res, args.mode), name=f"ST {stem}")
     (out / f"{stem}_track.json").write_text(json.dumps({
         "video": str(video), "surface": args.surface, "points": pts.tolist(), "ref_frame": args.ref_frame,
-        "focal": res.pose.focal, "focal_source": res.focal_source, "size": res.pose.size,
+        "focal": res.pose.focal.tolist(), "focal_source": res.focal_source, "size": res.pose.size,
         "corners": res.corners.tolist(), "confidence": res.track.confidence.tolist(),
         "R": res.pose.R.tolist(), "t": res.pose.t.tolist()}))
     print(f"Script After Effects : {jsx}")

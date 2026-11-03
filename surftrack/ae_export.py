@@ -26,7 +26,8 @@ def _ae_orientation(R):
 def build_ae_data(res, mode):
     """Prépare les valeurs d'images clés (unités = pixels de la vidéo source) depuis pipeline.Result."""
     pose, ref = res.pose, res.track.ref_index
-    C = np.array([res.width / 2, res.height / 2, -pose.focal])
+    # caméra fixe à la distance de la focale de référence ; le zoom, lui, peut être animé
+    C = np.array([res.width / 2, res.height / 2, -pose.focal[ref]])
     frames, cam_pos, cam_ori, srf_pos, srf_ori = [], [], [], [], []
     R_ref, T_ref = pose.R[ref], pose.t[ref] + C
     for i in np.flatnonzero(pose.valid):
@@ -45,7 +46,8 @@ def build_ae_data(res, mode):
     check = [int(i) for i in np.linspace(0, len(frames) - 1, min(12, len(frames))).astype(int)]
     return {
         "width": res.width, "height": res.height, "fps": res.fps, "mode": mode, "shape": res.surface.kind,
-        "focal": round(float(pose.focal), 4),
+        "zoom": [round(float(pose.focal[i]), 3) for i in np.flatnonzero(pose.valid)]
+                if np.ptp(pose.focal[pose.valid]) > 0.5 else [round(float(pose.focal[ref]), 3)],
         "size": [round(float(pose.size[0]), 4), round(float(pose.size[1]), 4)],
         "frames": frames,
         "camPos": cam_pos, "camOri": cam_ori, "srfPos": srf_pos, "srfOri": srf_ori,
@@ -99,7 +101,9 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
     // --- Caméra (une seule cible, pas d'orientation automatique)
     var cam = comp.layers.addCamera(NAME + " Caméra", [comp.width / 2, comp.height / 2]);
     cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
-    cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom").setValue(D.focal * k);
+    var zooms = [];
+    for (var z = 0; z < D.zoom.length; z++) zooms.push(D.zoom[z] * k);
+    animate(cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom"), zooms);
     var camT = cam.property("ADBE Transform Group");
     animate(camT.property("ADBE Position"), scaleAll(D.camPos));
     animate(camT.property("ADBE Orientation"), D.camOri);
@@ -158,7 +162,8 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
 
     var msg = "3D Surface Tracker — " + (D.mode === "object" ? "mode OBJET (caméra fixe)" : "mode CAMÉRA (surface fixe)") +
               "\n\n" + D.frames.length + " images clés créées." +
-              "\nFocale : " + (D.focal * k).toFixed(0) + " px (zoom caméra)" +
+              "\nZoom caméra : " + (D.zoom.length === 1 ? (D.zoom[0] * k).toFixed(0) + " px"
+                                    : "animé (" + D.zoom.length + " clés, zoom de l'objectif)") +
               "\nContrôle de reprojection : moyenne " + (errSum / nErr).toFixed(2) + " px, max " + errMax.toFixed(2) + " px";
     if (errMax > 3) msg += "\n\n⚠ Écart élevé : vérifiez que le calque vidéo sélectionné est bien celui tracké.";
     msg += "\n\nPlacez votre contenu comme enfant de « " + nul.name + " » (ou remplacez le solide).";

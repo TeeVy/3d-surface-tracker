@@ -24,10 +24,17 @@ class LensInfo:
     camera: str
     lens: str
     varies: bool           # zoom pendant le plan
+    per_frame_mm: np.ndarray = None  # focale équivalent 35 mm de chaque image
 
     def focal_px(self, width, height):
         # 36 mm = largeur d'un capteur plein format = grand côté de l'image
         return self.focal35_mm / 36.0 * max(width, height)
+
+    def focal_px_per_frame(self, width, height, n):
+        """Focale en pixels pour chacune des n images (zoom compris)."""
+        f = np.asarray(self.per_frame_mm if self.per_frame_mm is not None else [self.focal35_mm], float)
+        f = f[:n] if len(f) >= n else np.concatenate([f, np.full(n - len(f), f[-1])])
+        return f / 36.0 * max(width, height)
 
 
 def _rdd18_distance(v):
@@ -95,4 +102,5 @@ def read_lens_info(path):
         camera=cam.group(1).decode(errors="replace") if cam else "?",
         lens=lens.group(1).decode(errors="replace") if lens else "?",
         varies=(max(f35) - min(f35)) > 0.5,
+        per_frame_mm=np.array(f35),
     )

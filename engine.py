@@ -91,7 +91,7 @@ def cmd_track(a):
     emit(type="result", jsx=str(jsx), alt_jsx=str(alt_jsx) if alt_jsx else None,
          preview_dir=str(out / "preview"),
          alt_preview_dir=str(out / "preview_inverse") if alt_jsx else None,
-         frames=res.n_frames, lost=lost, focal=res.pose.focal, focal_source=res.focal_source,
+         frames=res.n_frames, lost=lost, focal=float(np.median(res.pose.focal)), focal_source=res.focal_source,
          error_mean=float(np.nanmean(res.pose.reproj_error)),
          error_max=float(np.nanmax(res.pose.reproj_error)),
          confidence=[round(float(c), 3) for c in res.track.confidence])

@@ -7,8 +7,8 @@ import numpy as np
 from .metadata import read_lens_info
 from .ellipse_track import EllipseTracker, snap_ellipse
 from .geometry import warp_points
-from .pose import (estimate_aspect, estimate_focal, project_corners, solve_disc_poses, solve_poses,
-                   stabilize_poses)
+from .pose import (as_focals, estimate_aspect, estimate_focal, project_corners, solve_disc_poses,
+                   solve_poses, stabilize_poses)
 from .tracker import PlanarTracker
 from .video import load_gray, video_size
 
@@ -93,10 +93,13 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
     else:
         lens = read_lens_info(video)
         if lens:
-            focal = lens.focal_px(W, H)
-            source = f"métadonnées {lens.camera} / {lens.lens} : {lens.focal35_mm:.1f} mm éq. 35 mm"
+            focal = lens.focal_px_per_frame(W, H, n)
+            mm = lens.per_frame_mm[:n]
             if lens.varies:
-                log("⚠ La focale varie pendant le plan (zoom) : valeur médiane utilisée.")
+                source = (f"métadonnées {lens.camera} / {lens.lens} : zoom de {mm.min():.1f} à "
+                          f"{mm.max():.1f} mm éq. 35 mm, image par image")
+            else:
+                source = f"métadonnées {lens.camera} / {lens.lens} : {lens.focal35_mm:.1f} mm éq. 35 mm"
         else:
             fe = estimate_focal(seqs_for, W, H)
             if fe.reliable:
@@ -104,7 +107,9 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
             else:
                 focal = 50 / 36 * max(W, H)
                 source = "défaut 50 mm (pas assez de perspective pour l'estimer : utilisez --focal-mm)"
-    log(f"Focale : {focal:.0f} px — {source}")
+    focal = as_focals(focal, n)
+    log(f"Focale : {np.median(focal):.0f} px — {source}" if np.ptp(focal) < 1 else
+        f"Focale : {focal.min():.0f} à {focal.max():.0f} px — {source}")
 
     if surface.kind == "disc":
         # 2 inclinaisons possibles. Le centre réel du disque n'est pas au centre de
@@ -113,7 +118,7 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
         sols, costs = [], []
         for k in (0, 1):
             p, c = solve_disc_poses(conics, track.homographies, focal, W, H, ref_frame, ref_order=(k, 1 - k))
-            ctr = focal * p.t[:, :2] / p.t[:, 2:3] + [W / 2, H / 2]
+            ctr = focal[:, None] * p.t[:, :2] / p.t[:, 2:3] + [W / 2, H / 2]
             moved = np.array([warp_points(Hh, ctr[ref_frame][None])[0] for Hh in track.homographies])
             ok = p.valid & np.isfinite(moved).all(axis=1)
             sols.append((p, c))
