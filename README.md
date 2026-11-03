@@ -15,7 +15,31 @@ Dans le Terminal, depuis ce dossier :
 > Le Python de Homebrew installé sur ce Mac a un module XML cassé : on utilise celui d'Apple (`/usr/bin/python3`).
 > `ffmpeg` (déjà installé) sert à lire la focale dans les métadonnées des caméras Sony.
 
-## Utilisation
+## Panneau After Effects (recommandé)
+
+Installation (une seule fois, puis redémarrer After Effects) :
+
+```bash
+ln -sfn "$PWD/panel" ~/Library/Application\ Support/Adobe/CEP/extensions/com.surftrack.panel
+```
+
+Le panneau s'ouvre via *Fenêtre > Extensions > 3D Surface Tracker*. Il faut que le mode développeur
+CEP soit activé (`defaults read com.adobe.CSXS.12 PlayerDebugMode` doit renvoyer 1, ce qui est le cas sur ce Mac).
+
+1. **Plan** : dans la compo, sélectionnez le calque vidéo et placez l'instant courant sur une image où
+   la surface est bien visible, puis cliquez *Charger le calque sélectionné*.
+2. **Surface** : choisissez *Rectangle* ou *Disque*, et *Objet mobile* ou *Caméra mobile*, puis cliquez
+   sur l'image : 4 coins, ou des points sur le bord du disque. Pour ajuster :
+   - molette pour zoomer, Espace ou clic droit pour déplacer la vue ;
+   - glissez un point pour le corriger (une loupe s'affiche) ;
+   - clic droit sur un point pour le supprimer.
+3. **Tracker** : la progression et le journal s'affichent.
+4. **Résultat** : parcourez l'aperçu (l'instant d'AE suit). Si l'inclinaison est ambiguë, comparez avec
+   *Inclinaison inversée*. Cliquez ensuite *Appliquer dans After Effects*.
+
+Les fichiers de chaque session sont dans `out/panel/`.
+
+## Utilisation en ligne de commande
 
 1. **Tracker.** Une fenêtre s'ouvre sur la première image :
    - rectangle : cliquez les 4 coins dans l'ordre haut-gauche → haut-droit → bas-droit → bas-gauche ;

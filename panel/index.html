@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>3D Surface Tracker</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header>
+    <h1>3D Surface Tracker</h1>
+    <span id="version">0.1</span>
+  </header>
+
+  <!-- 1. Plan -->
+  <section id="s-shot">
+    <h2><span class="num">1</span> Plan</h2>
+    <button id="btn-load" class="primary wide">Charger le calque sélectionné</button>
+    <div id="shot-info" class="info hidden"></div>
+    <ul id="shot-warnings" class="warnings"></ul>
+  </section>
+
+  <!-- 2. Surface -->
+  <section id="s-surface" class="disabled">
+    <h2><span class="num">2</span> Surface</h2>
+    <div class="row">
+      <div class="seg" id="seg-surface">
+        <button data-v="rect" class="on">Rectangle</button>
+        <button data-v="disc">Disque</button>
+      </div>
+      <div class="seg" id="seg-mode">
+        <button data-v="object" class="on" title="La caméra est fixe, l'objet bouge">Objet mobile</button>
+        <button data-v="camera" title="La surface est fixe, la caméra bouge">Caméra mobile</button>
+      </div>
+    </div>
+    <div id="canvas-wrap">
+      <canvas id="view"></canvas>
+      <div id="canvas-empty">Chargez un calque pour afficher l'image de référence.</div>
+    </div>
+    <div class="row hint-row">
+      <span id="hint" class="hint"></span>
+      <button id="btn-clear" class="small">Effacer</button>
+    </div>
+    <details id="advanced">
+      <summary>Réglages avancés</summary>
+      <label>Focale (mm, équivalent plein format)
+        <input id="in-focal" type="number" min="5" max="1200" step="0.1" placeholder="auto">
+      </label>
+      <div id="focal-note" class="note"></div>
+      <label>Stabilisation de l'inclinaison <span id="smooth-val">auto</span>
+        <input id="in-smooth" type="range" min="-1" max="10" step="1" value="-1">
+      </label>
+      <div class="note">Plus fort = plus stable, mais léger retard sur les rotations rapides.</div>
+    </details>
+  </section>
+
+  <!-- 3. Tracking -->
+  <section id="s-track" class="disabled">
+    <h2><span class="num">3</span> Tracking</h2>
+    <div class="row">
+      <button id="btn-track" class="primary grow">Tracker</button>
+      <button id="btn-cancel" class="hidden">Annuler</button>
+    </div>
+    <div id="progress" class="hidden"><div id="progress-bar"></div><span id="progress-label"></span></div>
+    <details id="log-box"><summary>Journal</summary><pre id="log"></pre></details>
+  </section>
+
+  <!-- 4. Résultat -->
+  <section id="s-result" class="disabled">
+    <h2><span class="num">4</span> Résultat</h2>
+    <ul id="summary" class="summary"></ul>
+    <div class="row">
+      <button id="btn-play" class="small" title="Lecture / pause">▶</button>
+      <input id="scrub" type="range" min="0" max="0" value="0" class="grow">
+      <span id="frame-label" class="mono">0</span>
+    </div>
+    <div class="row">
+      <label class="check"><input id="chk-sync" type="checkbox" checked> Synchroniser l'instant d'AE</label>
+      <label class="check hidden" id="flip-wrap"><input id="chk-flip" type="checkbox"> Inclinaison inversée</label>
+    </div>
+    <button id="btn-apply" class="primary wide">Appliquer dans After Effects</button>
+    <div id="apply-msg" class="info hidden"></div>
+  </section>
+
+  <div id="toast" class="hidden"></div>
+  <script src="js/main.js"></script>
+</body>
+</html>

@@ -64,7 +64,9 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
 
     var comp = app.project.activeItem;
     if (!(comp instanceof CompItem)) {
-        alert("3D Surface Tracker\n\nOuvrez d'abord la composition qui contient la vidéo trackée.");
+        var noComp = "Ouvrez d'abord la composition qui contient la vidéo trackée.";
+        if ($.global.ST_PANEL) { $.global.ST_RESULT = "ERREUR " + noComp; return; }
+        alert("3D Surface Tracker\n\n" + noComp);
         return;
     }
     var k = comp.width / D.width;
@@ -72,8 +74,9 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
         if (!confirm("Les proportions de la composition (" + comp.width + "x" + comp.height +
                      ") diffèrent de la vidéo trackée (" + D.width + "x" + D.height + ").\nContinuer quand même ?")) return;
     }
-    var startTime = 0;
-    if (comp.selectedLayers.length > 0) startTime = comp.selectedLayers[0].startTime;
+    var startTime = 0;  // temps compo de la 1re image de la vidéo
+    if (typeof $.global.ST_TIME_OFFSET === "number") startTime = $.global.ST_TIME_OFFSET;  // panneau (précomps compris)
+    else if (comp.selectedLayers.length > 0) startTime = comp.selectedLayers[0].startTime;
 
     function sc(v) { return [v[0] * k, v[1] * k, v[2] * k]; }
     function times() {
@@ -160,6 +163,7 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
     if (errMax > 3) msg += "\n\n⚠ Écart élevé : vérifiez que le calque vidéo sélectionné est bien celui tracké.";
     msg += "\n\nPlacez votre contenu comme enfant de « " + nul.name + " » (ou remplacez le solide).";
     if ($.global.ST_TEST_MODE) { $.global.ST_TEST_RESULT = {mean: errSum / nErr, max: errMax}; return; }
+    if ($.global.ST_PANEL) { $.global.ST_RESULT = msg; return; }
     alert(msg);
 })();
 """

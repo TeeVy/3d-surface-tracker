@@ -7,3 +7,5 @@ __pycache__/
 tests/
 *.MP4
 *.mp4
+panel/demo.jpg
+.claude/
