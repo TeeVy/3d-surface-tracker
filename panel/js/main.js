@@ -29,8 +29,8 @@
   const state = {
     shot: null,          // calque chargé (réponse de stGetSelection)
     workDir: null,
-    surface: 'rect',
-    mode: 'object',
+    surface: 'rect',         // outil : 'rect' | 'disc' | 'free'
+    live: null,              // aperçu en direct : {img, poly, w, h, frame}
     points: [],          // en pixels de la vidéo
     img: null,           // image de référence
     view: null,          // {s, ox, oy} en pixels canvas
@@ -94,7 +94,7 @@
       const env = Object.assign({}, nodeProcess.env, { PYTHONUNBUFFERED: '1' });
       // AE ne transmet pas le PATH du Terminal : on ajoute Homebrew pour ffmpeg (métadonnées caméra)
       env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', env.PATH || '/usr/bin:/bin'].join(':');
-      const child = cp.spawn(PY, [ENGINE].concat(args), { cwd: ROOT, env });
+      const child = cp.spawn(PY, [ENGINE].concat(args), { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
       state.child = child;
       let buf = '', stderr = '', result = null, error = null;
       child.stdout.on('data', (d) => {
@@ -138,7 +138,10 @@
     $('shot-info').classList.remove('hidden');
     const via = sel.chain.length > 1 ? ` <span class="dim">(via ${sel.chain.slice(1).map(escapeHtml).join(' › ')})</span>` : '';
     $('shot-info').innerHTML = `<b>${escapeHtml(sel.layerName)}</b> — ${escapeHtml(path.basename(sel.file))}${via}<br>` +
-      `Compo « ${escapeHtml(sel.compName)} » · image de référence <b>${sel.frame}</b> (instant courant)`;
+      `Compo « ${escapeHtml(sel.compName)} » · image de référence <b>${sel.frame}</b> (instant courant)<br>` +
+      `Plage trackée : images <b>${sel.rangeStart}</b> à <b>${sel.rangeEnd}</b> ` +
+      `(${sel.rangeEnd - sel.rangeStart + 1} sur ${sel.srcFrames}, partie visible du calque)`;
+    resetRange();
     const w = $('shot-warnings');
     w.innerHTML = '';
     sel.warnings.forEach((m) => { const li = document.createElement('li'); li.textContent = m; w.appendChild(li); });
@@ -185,6 +188,7 @@
   const ctx = canvas.getContext('2d');
 
   function shownImage() {
+    if (state.show === 'live' && state.live) return state.live.img;
     return state.show === 'result' && state.previewImg ? state.previewImg : state.img;
   }
 
@@ -276,7 +280,8 @@
   }
 
   function ready() {
-    return state.surface === 'rect' ? state.points.length === 4 : state.points.length >= 5;
+    const n = state.points.length;
+    return state.surface === 'rect' ? n === 4 : state.surface === 'disc' ? n >= 5 : n >= 3;
   }
 
   function draw() {
@@ -291,6 +296,23 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, v.ox, v.oy, img.width * k * v.s, img.height * k * v.s);
     if (state.show === 'edit') drawShape();
+    if (state.show === 'live' && state.live && state.live.poly.length) drawLivePoly(k);
+  }
+
+  /** Zone suivie sur l'image en direct (coordonnées de l'image réduite envoyée par le moteur). */
+  function drawLivePoly(k) {
+    const v = state.view, dpr = window.devicePixelRatio || 1;
+    ctx.beginPath();
+    state.live.poly.forEach((p, i) => {
+      const x = p[0] * k * v.s + v.ox, y = p[1] * k * v.s + v.oy;
+      if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    });
+    ctx.closePath();
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = '#3ce07a';
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(60, 224, 122, 0.12)';
+    ctx.fill();
   }
 
   function drawShape() {
@@ -299,12 +321,13 @@
     const ok = ready();
     ctx.lineWidth = 1.5 * dpr;
     ctx.strokeStyle = ok ? '#3ce07a' : '#f0c040';
-    if (state.surface === 'rect' && pts.length > 1) {
-      const o = pts.length === 4 ? orderRect(pts) : pts;
+    if ((state.surface === 'rect' || state.surface === 'free') && pts.length > 1) {
+      const o = state.surface === 'rect' && pts.length === 4 ? orderRect(pts) : pts;
       ctx.beginPath();
       o.forEach((p, i) => { const [x, y] = toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
-      if (pts.length === 4) ctx.closePath();
+      if (ok) ctx.closePath();
       ctx.stroke();
+      if (ok && state.surface === 'free') { ctx.fillStyle = 'rgba(60, 224, 122, 0.10)'; ctx.fill(); }
     }
     if (state.surface === 'disc') {
       const e = fitEllipse(pts);
@@ -368,7 +391,7 @@
       refresh();
       return;
     }
-    if (ev.button === 1 || ev.button === 2 || state.space || state.show === 'result') {
+    if (ev.button === 1 || ev.button === 2 || state.space || state.show !== 'edit') {
       state.drag = { kind: 'pan', x, y };
       canvas.classList.add('pan');
       return;
@@ -448,24 +471,37 @@
   });
   window.addEventListener('resize', draw);
 
-  function segment(id, key, onChange) {
-    $(id).querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
-      $(id).querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
-      state[key] = b.dataset.v;
-      if (onChange) onChange();
-    }));
+  document.querySelectorAll('#toolbar [data-tool]').forEach((b) => b.addEventListener('click', () => {
+    if (state.child || b.dataset.tool === state.surface) return;
+    document.querySelectorAll('#toolbar [data-tool]').forEach((x) => x.classList.toggle('on', x === b));
+    state.surface = b.dataset.tool;
+    state.points = [];
+    state.show = 'edit';
+    invalidateResult();
+    refresh();
+  }));
+  $('btn-fit').addEventListener('click', fitView);
+  $('in-mode').addEventListener('change', invalidateResult);
+  $('in-start').addEventListener('input', invalidateResult);
+  $('in-end').addEventListener('input', invalidateResult);
+  $('btn-range-reset').addEventListener('click', () => { resetRange(); invalidateResult(); });
+
+  function resetRange() {
+    if (!state.shot) return;
+    $('in-start').value = String(state.shot.rangeStart);
+    $('in-end').value = String(state.shot.rangeEnd);
   }
-  segment('seg-surface', 'surface', () => { state.points = []; invalidateResult(); refresh(); });
-  segment('seg-mode', 'mode', () => invalidateResult());
 
   $('btn-clear').addEventListener('click', () => {
-    if (state.show === 'result') { // « Retoucher » : revenir aux points sans les effacer
-      stopPlay();
-      state.show = 'edit';
-    } else {
-      state.points = [];
-      invalidateResult();
-    }
+    if (state.child) return;
+    state.points = [];
+    state.show = 'edit';
+    invalidateResult();
+    refresh();
+  });
+  $('btn-edit').addEventListener('click', () => {  // revenir aux points sans les effacer
+    stopPlay();
+    state.show = 'edit';
     refresh();
   });
   $('in-smooth').addEventListener('input', () => {
@@ -479,17 +515,22 @@
     const n = state.points.length;
     let hint;
     if (state.show === 'result') hint = 'Aperçu du résultat : vert = zone suivie, cyan = surface 3D.';
+    else if (state.show === 'live') hint = 'Suivi en cours : arrêtez dès que la zone verte décroche, ce qui est déjà tracké est gardé.';
     else if (!state.img) hint = '';
     else if (state.surface === 'rect') {
       hint = n < 4 ? `Cliquez les 4 coins du rectangle (${n}/4).` : 'Prêt. Glissez un coin pour l\'ajuster.';
-    } else {
+    } else if (state.surface === 'disc') {
       hint = n < 5 ? `Cliquez des points sur le bord du disque (${n}/5 min., 8+ conseillé).`
         : `Prêt (${n} points). Ajoutez-en ou glissez-les pour ajuster.`;
+    } else {
+      hint = n < 3 ? `Cliquez le contour d'une zone plane, point par point (${n}/3 min.).`
+        : `Prêt (${n} points). L'orientation sera déduite du mouvement.`;
     }
     if (state.img && state.show === 'edit') hint += ' Molette : zoom · Espace/clic droit : déplacer · Clic droit sur un point : supprimer.';
     $('hint').textContent = hint;
     $('btn-track').disabled = !ready() || !!state.child;
-    $('btn-clear').textContent = state.show === 'result' ? 'Retoucher' : 'Effacer';
+    $('btn-edit').classList.toggle('hidden', state.show !== 'result');
+    $('live-badge').classList.toggle('hidden', state.show !== 'live' || !state.live);
     draw();
   }
 
@@ -509,7 +550,8 @@
     const pts = state.surface === 'rect' ? orderRect(state.points) : state.points;
     const args = ['track', sh.file, '--surface', state.surface,
       '--points', pts.map((p) => `${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(' '),
-      '--ref-frame', String(sh.frame), '--mode', state.mode,
+      '--ref-frame', String(sh.frame), '--mode', $('in-mode').value,
+      '--start', String(parseInt($('in-start').value, 10)), '--end', String(parseInt($('in-end').value, 10)),
       '--out-dir', path.join(state.workDir, `run${++state.runCount}`),
       '--name', sh.footageName.replace(/\.[^.]+$/, '')];
     const focal = parseFloat($('in-focal').value);
@@ -517,14 +559,29 @@
     const smooth = +$('in-smooth').value;
     if (smooth >= 0) args.push('--smooth', String(smooth));
 
+    const a = parseInt($('in-start').value, 10), b = parseInt($('in-end').value, 10);
+    if (!(a <= sh.frame && sh.frame <= b)) {
+      toast(`L'image de référence (${sh.frame}) doit être dans la plage trackée (${a} à ${b}).`);
+      return;
+    }
     $('log').textContent = '';
     state.warnings = [];
+    state.live = null;
+    state.show = 'live';
     setBusy(true);
     try {
       const res = await runEngine(args, (ev) => {
         if (ev.type === 'log') {
           log(ev.msg);
           if (ev.msg.indexOf('⚠') === 0) state.warnings.push(ev.msg.replace(/^⚠\s*/, ''));
+        } else if (ev.type === 'live') {
+          const img = new Image();
+          img.onload = () => {
+            state.live = { img, poly: ev.poly, frame: ev.frame };
+            $('live-badge').textContent = `Image ${ev.frame}`;
+            if (state.show === 'live') refresh();
+          };
+          img.src = ev.img;
         } else if (ev.type === 'progress') {
           const f = ev.stage === 'track' ? 0.9 * ev.done / ev.total : 0.9 + 0.1 * ev.done / ev.total;
           setProgress(f, ev.stage === 'track' ? `Tracking ${ev.done}/${ev.total}` : 'Préparation de l\'aperçu…');
@@ -532,6 +589,7 @@
       });
       showResult(res);
     } catch (e) {
+      state.show = 'edit';
       if (e.message !== 'Annulé.') toast(e.message);
     } finally {
       setBusy(false);
@@ -540,10 +598,13 @@
 
   function setBusy(on) {
     $('btn-track').classList.toggle('hidden', on);
-    $('btn-cancel').classList.toggle('hidden', !on);
+    $('btn-stop').classList.toggle('hidden', !on);
+    $('btn-stop').disabled = false;
+    $('btn-stop').textContent = '■ Arrêter et garder';
     $('progress').classList.toggle('hidden', !on);
     $('btn-load').disabled = on;
-    enable('s-surface', !on && !!state.img);
+    $('toolbar').classList.toggle('disabled', on);
+    $('advanced').classList.toggle('disabled', on);
     if (on) setProgress(0, 'Démarrage…');
     refresh();
   }
@@ -554,7 +615,12 @@
   }
 
   $('btn-track').addEventListener('click', track);
-  $('btn-cancel').addEventListener('click', () => { if (state.child) state.child.kill(); });
+  $('btn-stop').addEventListener('click', () => {
+    if (!state.child) return;
+    state.child.stdin.write('stop\n');  // le moteur termine avec les images déjà trackées
+    $('btn-stop').disabled = true;
+    $('btn-stop').textContent = 'Arrêt… calcul de la 3D';
+  });
 
   // ------------------------------------------------------------------ 4. résultat
   function showResult(res) {
@@ -564,8 +630,11 @@
     ul.innerHTML = '';
     const add = (cls, txt) => { const li = document.createElement('li'); li.className = cls; li.textContent = txt; ul.appendChild(li); };
     const lost = res.lost.length;
-    add(lost ? 'warn' : 'ok', `${res.frames - lost}/${res.frames} images trackées` +
-      (lost ? ` — suivi perdu sur ${lost} image(s), sans image clé` : ''));
+    add(lost ? 'warn' : 'ok', `${res.frames - lost}/${res.frames} images trackées (${res.start} à ${res.end})` +
+      (lost ? (res.stopped ? ' — tracking arrêté, le reste n\'a pas de clé' : ` — suivi perdu sur ${lost} image(s), sans image clé`) : ''));
+    add('ok', (res.motion === 'camera' ? 'La caméra bouge : la caméra AE est animée, la surface reste fixe'
+      : 'L\'objet bouge : la surface est animée, la caméra AE reste fixe') +
+      ($('in-mode').value === 'auto' ? ' (détecté, modifiable dans les réglages avancés)' : ''));
     const metaFocal = /métadonnées|saisie/.test(res.focal_source);
     add(metaFocal ? 'ok' : 'warn', `Focale ${Math.round(res.focal)} px — ${res.focal_source}`);
     add(res.error_mean < 1.5 ? 'ok' : 'warn',
@@ -576,7 +645,8 @@
     $('apply-msg').classList.add('hidden');
 
     const sc = $('scrub');
-    sc.max = String(res.frames - 1);
+    sc.min = String(res.start);
+    sc.max = String(res.end);
     sc.value = String(state.shot.frame);
     enable('s-result', true);
     showFrame(+sc.value);
@@ -619,10 +689,12 @@
   $('btn-play').addEventListener('click', () => {
     if (state.playTimer) { stopPlay(); syncAE(+$('scrub').value); return; }
     $('btn-play').textContent = '❚❚';
+    state.show = 'result';
+    refresh();
     const fps = Math.min(25, state.shot.fps || 25);
     state.playTimer = setInterval(() => {
       const sc = $('scrub');
-      const i = (+sc.value + 1) % (+sc.max + 1);
+      const i = +sc.value >= +sc.max ? +sc.min : +sc.value + 1;
       sc.value = String(i);
       showFrame(i);
     }, 1000 / fps);

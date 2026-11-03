@@ -147,3 +147,36 @@ class DiscSurface:
             seq = np.array([warp_points(H, c) for H in homographies if np.all(np.isfinite(H))])
             costs.append(orthogonality_cost(seq, focal, width, height))
         return cands[int(np.argmin(costs))], 1.0
+
+
+class FreeSurface:
+    """Surface plane de forme quelconque (polygone). Son orientation n'est pas
+    donnée par sa forme : elle est déduite du mouvement (voir scene.py)."""
+    kind = "free"
+
+    def __init__(self, points):
+        self.points = np.asarray(points, np.float64).reshape(-1, 2)
+        if len(self.points) < 3:
+            raise ValueError("Une forme libre a besoin d'au moins 3 points.")
+
+    def track_polygon(self):
+        return self.points
+
+    def reference_rect(self, normal, focal, width, height):
+        """Rectangle englobant la forme, posé sur le plan de normale donnée.
+
+        Renvoie (4 coins image sur la référence, proportions, contour de la forme
+        en coordonnées 0..1 du rectangle)."""
+        K = np.array([[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]])
+        n = np.asarray(normal, float) / np.linalg.norm(normal)
+        rays = np.column_stack([self.points, np.ones(len(self.points))]) @ np.linalg.inv(K).T
+        X = rays / (rays @ n)[:, None]                     # points sur le plan n·X = 1
+        u = np.array([1.0, 0, 0]) - n[0] * n
+        u /= np.linalg.norm(u)
+        v = np.cross(n, u)                                 # vers le bas pour un plan de face
+        a, b = X @ u, X @ v
+        a0, a1, b0, b1 = a.min(), a.max(), b.min(), b.max()
+        P = np.array([a0 * u + b0 * v + n, a1 * u + b0 * v + n, a1 * u + b1 * v + n, a0 * u + b1 * v + n])
+        p = P @ K.T
+        outline = np.column_stack([(a - a0) / (a1 - a0), (b - b0) / (b1 - b0)])
+        return p[:, :2] / p[:, 2:3], float((a1 - a0) / (b1 - b0)), outline

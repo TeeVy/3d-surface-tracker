@@ -87,7 +87,9 @@ class PlanarTracker:
         self._cache = {}
 
     # ------------------------------------------------------------------ public
-    def track(self, frames, ref_index, polygon, progress=None):
+    def track(self, frames, ref_index, polygon, progress=None, should_stop=None):
+        """progress(fait, total, i, H) après chaque image ; should_stop() -> True pour
+        arrêter : les images non encore trackées restent vides (NaN)."""
         poly = np.asarray(polygon, dtype=np.float64).reshape(-1, 2)
         n = len(frames)
         self.ref_tpl = _Template(frames[ref_index], poly)
@@ -101,10 +103,14 @@ class PlanarTracker:
         anchored = np.zeros(n, bool)
         Hs[ref_index], conf[ref_index], anchored[ref_index] = np.eye(3), 1.0, True
         done = 1
+        self.stopped = False
         for step in (1, -1):  # vers l'avant puis vers l'arrière depuis la référence
             H_prev, dH_prev, prev = np.eye(3), np.eye(3), ref_index
             i = ref_index + step
             while 0 <= i < n:
+                if should_stop is not None and should_stop():
+                    self.stopped = True
+                    break
                 self._cache = {}
                 H, c, a = self._step(frames[prev], frames[i], H_prev, dH_prev, poly)
                 Hs[i], conf[i], anchored[i] = H, c, a
@@ -113,7 +119,9 @@ class PlanarTracker:
                 i += step
                 done += 1
                 if progress:
-                    progress(done, n)
+                    progress(done, n, i - step, H)
+            if self.stopped:
+                break
         return TrackResult(Hs, conf, anchored, ref_index)
 
     # ----------------------------------------------------------------- interne

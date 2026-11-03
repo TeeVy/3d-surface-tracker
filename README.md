@@ -26,14 +26,23 @@ ln -sfn "$PWD/panel" ~/Library/Application\ Support/Adobe/CEP/extensions/com.sur
 Le panneau s'ouvre via *Fenêtre > Extensions > 3D Surface Tracker*. Il faut que le mode développeur
 CEP soit activé (`defaults read com.adobe.CSXS.12 PlayerDebugMode` doit renvoyer 1, ce qui est le cas sur ce Mac).
 
-1. **Plan** : dans la compo, sélectionnez le calque vidéo et placez l'instant courant sur une image où
-   la surface est bien visible, puis cliquez *Charger le calque sélectionné*.
-2. **Surface** : choisissez *Rectangle* ou *Disque*, et *Objet mobile* ou *Caméra mobile*, puis cliquez
-   sur l'image : 4 coins, ou des points sur le bord du disque. Pour ajuster :
+1. **Plan** : dans la compo, sélectionnez le calque vidéo (ou le précomp qui le contient) et placez
+   l'instant courant sur une image où la surface est bien visible, puis cliquez *Charger le calque
+   sélectionné*. Seule la partie du rush visible dans la compo sera trackée (modifiable dans les
+   réglages avancés).
+2. **Surface** : choisissez un outil dans la barre, puis cliquez sur l'image :
+   - *Rectangle* : les 4 coins (écran, étiquette, boîte) ;
+   - *Disque* : des points sur le bord (couvercle, tête ronde) ;
+   - *Forme libre* : le contour d'une zone plane quelconque. Son orientation est déduite du
+     mouvement, il faut donc que la caméra ou l'objet se déplace un peu.
+
+   Pour ajuster :
    - molette pour zoomer, Espace ou clic droit pour déplacer la vue ;
    - glissez un point pour le corriger (une loupe s'affiche) ;
    - clic droit sur un point pour le supprimer.
-3. **Tracker** : la progression et le journal s'affichent.
+3. **Tracker** : le suivi s'affiche en direct. *Arrêter et garder* stoppe dès que ça décroche, en
+   conservant les images déjà trackées. Le moteur détecte aussi qui bouge (l'objet ou la caméra), ce
+   qui décide de ce qui est animé dans AE. Le mode peut être forcé dans les réglages avancés.
 4. **Résultat** : parcourez l'aperçu (l'instant d'AE suit). Si l'inclinaison est ambiguë, comparez avec
    *Inclinaison inversée*. Cliquez ensuite *Appliquer dans After Effects*.
 

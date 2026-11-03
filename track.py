@@ -91,8 +91,8 @@ def main():
     g.add_argument("--pick", action="store_true", help="désigner la surface dans une fenêtre")
     g.add_argument("--quad", help='rect : 4 coins "x,y x,y x,y x,y" (HG, HD, BD, BG)')
     g.add_argument("--rim", help='disc : au moins 5 points du bord "x,y x,y …"')
-    ap.add_argument("--mode", choices=["object", "camera"], default="object",
-                    help="object : l'objet bouge (caméra fixe) ; camera : la caméra bouge (surface fixe)")
+    ap.add_argument("--mode", choices=["auto", "object", "camera"], default="auto",
+                    help="auto : détecté ; object : l'objet bouge (caméra fixe) ; camera : la caméra bouge")
     ap.add_argument("--focal", type=float, help="focale en pixels (sinon : métadonnées caméra, puis estimation)")
     ap.add_argument("--focal-mm", type=float, help="focale de l'objectif en mm, équivalent plein format")
     ap.add_argument("--sensor-mm", type=float, default=36.0, help="largeur du capteur en mm (défaut 36)")
@@ -111,12 +111,12 @@ def main():
         pts = parse_points(args.quad or args.rim, 4 if args.quad else 5, 4 if args.quad else None)
     surface = DiscSurface(pts) if args.surface == "disc" else RectSurface(pts)
 
-    def progress(done, total):
+    def progress(done, total, *_):
         print(f"\rTracking… {done}/{total}", end="" if done < total else "\n", flush=True)
 
     res = run(video, surface, args.ref_frame, focal_px=args.focal, focal_mm=args.focal_mm,
               sensor_mm=args.sensor_mm, aspect=args.aspect, smooth=args.smooth, flip=args.flip,
-              progress=progress)
+              progress=progress, mode=args.mode)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

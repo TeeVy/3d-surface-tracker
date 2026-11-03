@@ -60,11 +60,15 @@ function stGetSelection() {
     var offset = 0;                         // temps compo = offset + temps dans le fichier
     var Ax = 1, Ay = 1, Bx = 0, By = 0;     // pixel compo = A * pixel du calque courant + B
     var timeOk = true;
+    var lo = 0, hi = comp.duration;         // plage visible, dans le temps de la compo courante
 
     for (var depth = 0; depth < 12; depth++) {
         if (!(L instanceof AVLayer) || !L.source) return stFail("Le calque « " + L.name + " » n'est ni une vidéo ni un précomp.");
         chain.push(L.name);
         offset += L.startTime;
+        lo = Math.max(lo, L.inPoint) - L.startTime;   // -> temps de la source du calque
+        hi = Math.min(hi, L.outPoint) - L.startTime;
+        if (L.source instanceof CompItem) { lo = Math.max(lo, 0); hi = Math.min(hi, L.source.duration); }
         if (L.timeRemapEnabled || !stNear(L.stretch, 100, 0.01)) timeOk = false;
         var tr = L.property("ADBE Transform Group");
         var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
@@ -97,11 +101,22 @@ function stGetSelection() {
                       comp.width + "x" + comp.height + ") : le résultat aussi.");
     }
     var fps = src.frameRate;
+    var srcFrames = Math.round(src.duration * fps);
+    var first = Math.max(0, Math.ceil(lo * fps - 1e-6));
+    var last = Math.min(srcFrames - 1, Math.ceil(hi * fps - 1e-6) - 1);
+    if (last < first) return stFail("Le calque n'est visible sur aucune image de la composition.");
+    var frame = Math.round((comp.time - offset) * fps);
+    if (frame < first || frame > last) {
+        warnings.push("L'instant courant est hors de la partie visible du calque : l'image de référence est ramenée à " +
+                      (frame < first ? "sa première" : "sa dernière") + " image.");
+        frame = Math.min(last, Math.max(first, frame));
+    }
     return stJSON({
         ok: true, compId: comp.id, compName: comp.name, compW: comp.width, compH: comp.height,
         layerIndex: comp.selectedLayers[0].index, layerName: comp.selectedLayers[0].name,
         footageName: L.name, chain: chain, file: src.file.fsName, fps: fps, timeOffset: offset,
-        frame: Math.max(0, Math.round((comp.time - offset) * fps)), duration: src.duration, warnings: warnings
+        frame: frame, rangeStart: first, rangeEnd: last, srcFrames: srcFrames,
+        duration: src.duration, warnings: warnings
     });
 }
 

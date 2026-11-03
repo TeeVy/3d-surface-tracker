@@ -31,9 +31,8 @@ def annotated_frames(video_path, res, pose=None, max_side=1600, label=True):
     zone = res.surface.track_polygon()
     axis_len = 0.5 * min(w, h)
 
-    for i, img in enumerate(iter_bgr(video_path)):
-        if i >= res.n_frames:
-            break
+    off = res.frame_offset
+    for i, img in enumerate(iter_bgr(video_path, off, off + res.n_frames - 1)):
         img = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
         S = np.diag([s, s, 1.0])
         if pose.valid[i]:
@@ -57,7 +56,7 @@ def annotated_frames(video_path, res, pose=None, max_side=1600, label=True):
             fs = max(0.4, size[0] / 1400)
             cv2.putText(img, text, (10, int(30 * fs / 0.6)), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), 4, cv2.LINE_AA)
             cv2.putText(img, text, (10, int(30 * fs / 0.6)), cv2.FONT_HERSHEY_SIMPLEX, fs, color, 1, cv2.LINE_AA)
-        yield i, img
+        yield i + off, img  # indice dans le fichier vidéo
 
 
 def write_preview(video_path, out_path, res, max_side=1600):

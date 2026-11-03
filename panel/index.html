@@ -22,26 +22,50 @@
   <!-- 2. Surface -->
   <section id="s-surface" class="disabled">
     <h2><span class="num">2</span> Surface</h2>
-    <div class="row">
-      <div class="seg" id="seg-surface">
-        <button data-v="rect" class="on">Rectangle</button>
-        <button data-v="disc">Disque</button>
-      </div>
-      <div class="seg" id="seg-mode">
-        <button data-v="object" class="on" title="La caméra est fixe, l'objet bouge">Objet mobile</button>
-        <button data-v="camera" title="La surface est fixe, la caméra bouge">Caméra mobile</button>
-      </div>
+    <div class="toolbar" id="toolbar">
+      <button data-tool="rect" class="tool on" title="Rectangle : cliquez ses 4 coins (écran, étiquette, boîte…)">
+        <svg viewBox="0 0 24 24"><path d="M4 7l15-2 1 12-16 2z"/></svg><span>Rectangle</span>
+      </button>
+      <button data-tool="disc" class="tool" title="Disque : cliquez des points sur son bord (couvercle, tête ronde…)">
+        <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="9" ry="6.5" transform="rotate(-15 12 12)"/></svg><span>Disque</span>
+      </button>
+      <button data-tool="free" class="tool" title="Forme libre : cliquez le contour d'une zone plane, son orientation est déduite du mouvement">
+        <svg viewBox="0 0 24 24"><path d="M5 17l2-10 6 3 6-5-1 9-5 4z"/></svg><span>Forme libre</span>
+      </button>
+      <span class="grow"></span>
+      <button id="btn-fit" class="tool icon" title="Recadrer la vue (double-clic)">
+        <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      </button>
+      <button id="btn-clear" class="tool icon" title="Effacer les points">
+        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/></svg>
+      </button>
     </div>
     <div id="canvas-wrap">
       <canvas id="view"></canvas>
+      <div id="live-badge" class="live-badge hidden"></div>
       <div id="canvas-empty">Chargez un calque pour afficher l'image de référence.</div>
     </div>
     <div class="row hint-row">
       <span id="hint" class="hint"></span>
-      <button id="btn-clear" class="small">Effacer</button>
+      <button id="btn-edit" class="small hidden" title="Revenir aux points de la surface">Retoucher</button>
     </div>
     <details id="advanced">
       <summary>Réglages avancés</summary>
+      <div class="row tight">
+        <label class="grow">Première image <input id="in-start" type="number" min="0" step="1"></label>
+        <label class="grow">Dernière image <input id="in-end" type="number" min="0" step="1"></label>
+        <button id="btn-range-reset" class="small" title="Revenir à la partie visible du calque">↺</button>
+      </div>
+      <div class="note">Par défaut : la partie du rush visible dans la compo.</div>
+      <label>Mouvement
+        <select id="in-mode">
+          <option value="auto">Automatique (détecté)</option>
+          <option value="object">L'objet bouge, la caméra est fixe</option>
+          <option value="camera">La caméra bouge, la surface est fixe</option>
+        </select>
+      </label>
+      <div class="note">Ne change rien au contenu collé sur la surface ; détermine ce qui est animé dans AE
+        (utile si vous ajoutez d'autres éléments 3D à la scène).</div>
       <label>Focale (mm, équivalent plein format)
         <input id="in-focal" type="number" min="5" max="1200" step="0.1" placeholder="auto">
       </label>
@@ -58,7 +82,7 @@
     <h2><span class="num">3</span> Tracking</h2>
     <div class="row">
       <button id="btn-track" class="primary grow">Tracker</button>
-      <button id="btn-cancel" class="hidden">Annuler</button>
+      <button id="btn-stop" class="hidden grow" title="Arrête le suivi et garde les images déjà trackées">■ Arrêter et garder</button>
     </div>
     <div id="progress" class="hidden"><div id="progress-bar"></div><span id="progress-label"></span></div>
     <details id="log-box"><summary>Journal</summary><pre id="log"></pre></details>

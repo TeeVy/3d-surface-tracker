@@ -23,15 +23,18 @@ def _ae_orientation(R):
     return [round(float(v), 5) for v in o]
 
 
-def build_ae_data(res, mode):
-    """Prépare les valeurs d'images clés (unités = pixels de la vidéo source) depuis pipeline.Result."""
-    pose, ref = res.pose, res.track.ref_index
+def build_ae_data(res, mode="auto"):
+    """Prépare les valeurs d'images clés (unités = pixels de la vidéo source) depuis pipeline.Result.
+    mode : 'object', 'camera' ou 'auto' (celui détecté par le pipeline)."""
+    if mode == "auto":
+        mode = res.motion_mode
+    pose, ref, off = res.pose, res.track.ref_index, res.frame_offset
     # caméra fixe à la distance de la focale de référence ; le zoom, lui, peut être animé
     C = np.array([res.width / 2, res.height / 2, -pose.focal[ref]])
     frames, cam_pos, cam_ori, srf_pos, srf_ori = [], [], [], [], []
     R_ref, T_ref = pose.R[ref], pose.t[ref] + C
     for i in np.flatnonzero(pose.valid):
-        frames.append(int(i))
+        frames.append(int(i) + off)  # indice dans le fichier vidéo
         if mode == "object":
             srf_pos.append((pose.t[i] + C).round(4).tolist())
             srf_ori.append(_ae_orientation(pose.R[i]))
@@ -52,7 +55,8 @@ def build_ae_data(res, mode):
         "frames": frames,
         "camPos": cam_pos, "camOri": cam_ori, "srfPos": srf_pos, "srfOri": srf_ori,
         # coins trackés (pour l'autocontrôle dans AE) sur quelques images
-        "check": [{"f": frames[k], "c": res.corners[frames[k]].round(3).tolist()} for k in check],
+        "check": [{"f": frames[k], "c": res.corners[frames[k] - off].round(3).tolist()} for k in check],
+        "outline": None if res.outline is None else np.round(res.outline, 5).tolist(),
     }
 
 
@@ -137,6 +141,14 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
         sh.outTangents = [[e * w / 2, 0], [0, e * h / 2], [-e * w / 2, 0], [0, -e * h / 2]];
         sh.closed = true;
         mk.property("ADBE Mask Shape").setValue(sh);
+    }
+    if (D.shape === "free" && D.outline) {  // masque reprenant la forme libre
+        var mf = sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
+        var sf = new Shape(), vs = [];
+        for (var q = 0; q < D.outline.length; q++) vs.push([D.outline[q][0] * w, D.outline[q][1] * h]);
+        sf.vertices = vs;
+        sf.closed = true;
+        mf.property("ADBE Mask Shape").setValue(sf);
     }
     sol.moveBefore(nul);
 
