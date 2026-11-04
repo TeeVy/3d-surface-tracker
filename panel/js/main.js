@@ -1,10 +1,14 @@
 /* 3D Surface Tracker — panneau After Effects (CEP).
  *
- * Le panneau pilote le moteur Python (engine.py, lignes JSON sur stdout) via Node.js
- * et parle à After Effects via ExtendScript (jsx/host.jsx).
- * Le calque à tracker arrive par le script « Tracker le calque » (ae_scripts/), qui
- * dépose une demande dans ~/Library/Application Support/3D Surface Tracker/.
- * Hors d'After Effects (navigateur), il passe en mode démo : éditeur seul.
+ * Le panneau pilote une session du moteur Python (engine.py session, lignes JSON) via
+ * Node.js et parle à After Effects via ExtendScript (jsx/host.jsx).
+ *
+ * La séquence suivie est celle de la compo : l'image k montre l'image src[k] du fichier
+ * (précomps, remappages et étirements résolus par AE). Le panneau garde l'état complet
+ * (forme, homographies image par image) : chaque action peut être annulée (⌘Z), et le
+ * moteur ne sert qu'à décoder, suivre et calculer la 3D.
+ *
+ * Hors d'After Effects (navigateur), il passe en mode démo avec un moteur simulé.
  */
 (function () {
   'use strict';
@@ -12,11 +16,11 @@
   const $ = (id) => document.getElementById(id);
   const inCEP = !!window.__adobe_cep__;
   const nodeRequire = typeof require === 'function' ? require : (window.cep_node && window.cep_node.require);
-  const fs = nodeRequire && nodeRequire('fs');
-  const path = nodeRequire && nodeRequire('path');
-  const cp = nodeRequire && nodeRequire('child_process');
-  const os = nodeRequire && nodeRequire('os');
-  const nodeProcess = nodeRequire && nodeRequire('process');
+  const fs = inCEP && nodeRequire && nodeRequire('fs');
+  const path = inCEP && nodeRequire && nodeRequire('path');
+  const cp = inCEP && nodeRequire && nodeRequire('child_process');
+  const os = inCEP && nodeRequire && nodeRequire('os');
+  const nodeProcess = inCEP && nodeRequire && nodeRequire('process');
 
   // ------------------------------------------------------------------ chemins
   function extensionDir() {
@@ -28,31 +32,43 @@
   const PY = ROOT && path.join(ROOT, '.venv', 'bin', 'python');
   const ENGINE = ROOT && path.join(ROOT, 'engine.py');
   const APPDIR = inCEP ? path.join(os.homedir(), 'Library', 'Application Support', '3D Surface Tracker') : null;
+  const I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
   // ------------------------------------------------------------------ état
   const state = {
     shot: null,          // calque chargé (réponse de stGetLayer / stGetSelection)
+    eng: null,           // session du moteur
     lensMm: null,        // focale des métadonnées (éq. 35 mm), si présente
     workDir: null,
+    W: 0, H: 0, n: 0,    // dimensions de la vidéo, nombre d'images de la séquence
+    thumbsDir: null,
+    loadedUpto: -1,      // vignettes prêtes jusqu'à cette image du fichier
+    k: 0,                // image affichée (indice de séquence)
+    ref: 0,              // image de référence (celle où la forme est définie)
+    // --- état annulable
     tool: 'rect',        // 'rect' | 'free'
-    points: [],          // en pixels de la vidéo
+    points: [],          // forme, en pixels de la vidéo, sur l'image de référence
+    round: 0,            // arrondi des coins 0..100 (100 = disque)
     flip: false,         // disque : autre inclinaison
-    orientManual: false, // forme libre : orientation réglée à la main (gizmo)
-    freeNormal: null,    // forme libre : normale choisie au gizmo (repère caméra)
-    thumbsDir: null,     // vignettes de la plage, pour choisir l'image de référence
-    img: null,           // image de référence
+    orientManual: false, // forme libre : orientation réglée au gizmo
+    freeNormal: null,    // forme libre : normale choisie (repère caméra)
+    Hs: {},              // k -> homographie référence -> image k (9 nombres)
+    conf: {},            // k -> confiance du suivi
+    // ---
+    rev: 0,              // incrémenté à chaque modification (invalide la 3D)
+    pose: null,          // dernière 3D calculée {rev, poses, size, kind, outline, jsx, ...}
+    solving: false,
+    full: new Map(),     // k -> image pleine résolution (quelques-unes en cache)
+    cur: null,           // image affichée
     view: null,          // {s, ox, oy, fit} en pixels canvas
-    show: 'edit',        // 'edit' | 'browse' (timeline avant tracking) | 'live' | 'result'
-    live: null,          // aperçu en direct : {img, poly, frame}
-    drag: null,          // {kind:'point', i} | {kind:'pan', x, y} | {kind:'rotate', ...}
-    browseImg: null,     // vignette affichée pendant le choix de la référence
+    drag: null,
     hover: -1,
+    hoverRing: null,
     space: false,
-    result: null,
-    previewImg: null,
-    child: null,
-    runCount: 0,
+    tracking: null,      // {dir, count, btn}
     playTimer: null,
+    scrubbing: false,
+    undo: [], redo: [],
     pendingStamp: 0,
   };
 
@@ -72,9 +88,8 @@
     el.scrollTop = el.scrollHeight;
   }
 
-  function fileUrl(p) {
-    return 'file://' + encodeURI(p).replace(/#/g, '%23') + '?t=' + Date.now();
-  }
+  function fileUrl(p) { return 'file://' + encodeURI(p).replace(/#/g, '%23'); }
+  const pad5 = (i) => String(i).padStart(5, '0');
 
   function stamp() {
     const d = new Date();
@@ -88,6 +103,15 @@
 
   function enable(id, on) { $(id).classList.toggle('disabled', !on); }
 
+  function loadImg(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Impossible d'afficher l'image : " + src));
+      img.src = src;
+    });
+  }
+
   // ------------------------------------------------------------------ After Effects
   function host(fn, ...args) {
     const call = `${fn}(${args.map((a) => JSON.stringify(a)).join(',')})`;
@@ -99,43 +123,102 @@
   }
 
   // ------------------------------------------------------------------ moteur Python
-  function runEngine(args, onEvent, trackable = !!onEvent) {
-    return new Promise((resolve, reject) => {
-      if (!fs.existsSync(PY)) {
-        reject(new Error("Environnement Python introuvable :\n" + PY +
-          "\n\nDans le Terminal, depuis le dossier du projet :\n/usr/bin/python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"));
-        return;
+  function pythonEnv() {
+    const env = Object.assign({}, nodeProcess.env, { PYTHONUNBUFFERED: '1' });
+    // AE ne transmet pas le PATH du Terminal : on ajoute Homebrew pour ffmpeg (métadonnées caméra)
+    env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', env.PATH || '/usr/bin:/bin'].join(':');
+    return env;
+  }
+
+  /** Session du moteur : une ligne JSON par commande, réponses {type:'reply', id}. */
+  function startEngine(args, onEvent) {
+    if (!fs.existsSync(PY)) {
+      throw new Error("Environnement Python introuvable :\n" + PY +
+        "\n\nDans le Terminal, depuis le dossier du projet :\n/usr/bin/python3 -m venv .venv && .venv/bin/pip install -r requirements.txt");
+    }
+    const child = cp.spawn(PY, [ENGINE, 'session'].concat(args), { cwd: ROOT, env: pythonEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const eng = { child, nextId: 1, waiters: new Map(), dead: false, onEvent };
+    let buf = '', stderr = '';
+    child.stdout.on('data', (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch (e) { log(line); continue; }
+        if (ev.type === 'reply' && eng.waiters.has(ev.id)) {
+          const w = eng.waiters.get(ev.id);
+          eng.waiters.delete(ev.id);
+          if (ev.error) { log(ev.trace || ev.error); w.reject(new Error(ev.error)); } else w.resolve(ev);
+        } else if (ev.type === 'error') {
+          log(ev.trace || ev.msg);
+          toast(ev.msg);
+        } else if (eng.onEvent) eng.onEvent(ev);
       }
-      const env = Object.assign({}, nodeProcess.env, { PYTHONUNBUFFERED: '1' });
-      // AE ne transmet pas le PATH du Terminal : on ajoute Homebrew pour ffmpeg (métadonnées caméra)
-      env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', env.PATH || '/usr/bin:/bin'].join(':');
-      const child = cp.spawn(PY, [ENGINE].concat(args), { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
-      if (trackable) state.child = child;  // seul le tracking est « en cours » (arrêtable)
-      let buf = '', stderr = '', result = null, error = null;
-      child.stdout.on('data', (d) => {
-        buf += d;
-        let i;
-        while ((i = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, i).trim();
-          buf = buf.slice(i + 1);
-          if (!line) continue;
-          let ev;
-          try { ev = JSON.parse(line); } catch (e) { if (onEvent) onEvent({ type: 'log', msg: line }); continue; }
-          if (ev.type === 'result') result = ev;
-          else if (ev.type === 'error') error = ev;
-          else if (onEvent) onEvent(ev);
-        }
-      });
-      child.stderr.on('data', (d) => { stderr += d; });
-      child.on('error', (e) => reject(new Error('Impossible de lancer Python : ' + e.message)));
-      child.on('close', (code, signal) => {
-        if (state.child === child) state.child = null;
-        if (result) resolve(result);
-        else if (error) reject(new Error(error.msg));
-        else if (signal) reject(new Error('Annulé.'));
-        else reject(new Error(`Le moteur s'est arrêté (code ${code}).\n` + stderr.slice(-800)));
-      });
     });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (e) => toast('Impossible de lancer Python : ' + e.message));
+    child.on('close', (code) => {
+      eng.dead = true;
+      eng.waiters.forEach((w) => w.reject(new Error(`Le moteur s'est arrêté (code ${code}).\n` + stderr.slice(-600))));
+      eng.waiters.clear();
+      if (state.eng === eng && !eng.closing) {
+        toast(`Le moteur s'est arrêté (code ${code}).\n` + stderr.slice(-600));
+        state.eng = null;
+        refresh();
+      }
+    });
+    eng.send = (cmd, onEv) => new Promise((resolve, reject) => {
+      if (eng.dead) { reject(new Error('Le moteur est arrêté : rechargez le calque.')); return; }
+      const id = eng.nextId++;
+      eng.waiters.set(id, { resolve, reject });
+      child.stdin.write(JSON.stringify(Object.assign({ id }, cmd)) + '\n');
+    });
+    eng.stop = () => { if (!eng.dead) child.stdin.write('{"cmd":"stop"}\n'); };
+    eng.close = () => { eng.closing = true; try { child.stdin.end(); } catch (e) { /* déjà fermé */ } setTimeout(() => child.kill(), 1500); };
+    return eng;
+  }
+
+  /** Moteur simulé (mode démo dans un navigateur) : suivi = léger glissement, pas de 3D. */
+  function demoEngine(onEvent) {
+    const eng = { dead: false, onEvent, stopFlag: false };
+    eng.send = (cmd) => new Promise((resolve) => {
+      if (cmd.cmd === 'track') {
+        let i = cmd.k + cmd.dir, done = 0;
+        eng.stopFlag = false;
+        const tick = () => {
+          if (i < 0 || i >= state.n || (cmd.count && done >= cmd.count) || eng.stopFlag) {
+            resolve({ reason: eng.stopFlag ? 'stop' : 'end', last: i - cmd.dir, done });
+            return;
+          }
+          const dx = 3 * (i - cmd.ref), a = 0.004 * (i - cmd.ref);
+          onEvent({ type: 'tracked', k: i, H: [Math.cos(a), -Math.sin(a), dx, Math.sin(a), Math.cos(a), dx / 3, 0, 0, 1], conf: 0.9 });
+          i += cmd.dir; done++;
+          setTimeout(tick, 40);
+        };
+        tick();
+      } else resolve({ poses: {}, size: [1, 1], kind: 'rect', focal_source: 'démo', error_mean: null, log: [] });
+    });
+    eng.stop = () => { eng.stopFlag = true; };
+    eng.close = () => {};
+    return eng;
+  }
+
+  function onEngineEvent(ev) {
+    if (ev.type === 'log') log(ev.msg);
+    else if (ev.type === 'loaded') {
+      state.loadedUpto = Math.max(state.loadedUpto, ev.upto);
+      drawTimeline();
+      if (!state.cur || state.curThumbMissing) showFrame(state.k, { fast: true });
+    } else if (ev.type === 'tracked' && state.tracking) {
+      state.Hs[ev.k] = ev.H;
+      state.conf[ev.k] = ev.conf;
+      state.rev++;
+      state.k = ev.k;
+      showFrame(ev.k, { fast: true });
+    }
   }
 
   // ------------------------------------------------------------------ calque à tracker
@@ -145,7 +228,7 @@
       fs.mkdirSync(APPDIR, { recursive: true });
       fs.writeFileSync(path.join(APPDIR, 'alive.txt'), String(Date.now()));
       const pending = path.join(APPDIR, 'pending.json');
-      if (!fs.existsSync(pending) || state.child) return;
+      if (!fs.existsSync(pending) || state.tracking) return;
       const req = JSON.parse(fs.readFileSync(pending, 'utf8'));
       fs.unlinkSync(pending);
       if (req.stamp > state.pendingStamp && Date.now() - req.stamp < 60000) {
@@ -155,47 +238,64 @@
     } catch (e) { /* demande illisible : ignorée */ }
   }
 
+  function resetEdit() {
+    stopPlay();
+    Object.assign(state, {
+      tool: 'rect', points: [], round: 0, flip: false, orientManual: false, freeNormal: null,
+      Hs: {}, conf: {}, pose: null, undo: [], redo: [], full: new Map(), cur: null, loadedUpto: -1,
+    });
+    state.rev++;
+    $('in-focal').value = '';
+    syncControls();
+  }
+
   async function loadShot(sel) {
     if (!sel.ok) { toast(sel.msg); return; }
-    stopPlay();
+    if (state.eng) { state.eng.close(); state.eng = null; }
+    resetEdit();
     state.shot = sel;
-    state.points = [];
-    state.flip = false;
-    state.orientManual = false;
-    state.freeNormal = null;
-    state.result = null;
-    state.show = 'edit';
-    state.thumbsDir = null;
+    state.n = sel.frames.length;
+    state.k = state.ref = sel.cur;
     const stem = path.basename(sel.file).replace(/\.[^.]+$/, '');
     state.workDir = path.join(ROOT, 'out', 'panel', `${stem}_${stamp()}`);
+    // vignettes gardées d'une fois sur l'autre pour un même fichier
+    const st = fs.statSync(sel.file);
+    state.thumbsDir = path.join(ROOT, 'out', 'panel', 'cache', `${stem}_${st.size}_${Math.round(st.mtimeMs)}`);
 
     const via = sel.chain.length > 1 ? ` <span class="dim">via ${sel.chain.slice(1).map(escapeHtml).join(' › ')}</span>` : '';
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
     $('shot-info').innerHTML =
       `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · ${escapeHtml(path.basename(sel.file))}${via}</div>` +
-      `<div class="line dim">Réf. image ${sel.frame} · images ${sel.rangeStart}–${sel.rangeEnd} ` +
-      `(${sel.rangeEnd - sel.rangeStart + 1}) · « ${escapeHtml(sel.compName)} »</div>`;
+      `<div class="line dim">Images ${sel.seqStart}–${sel.seqStart + state.n - 1} de « ${escapeHtml(sel.compName)} » ` +
+      `(${state.n})</div>`;
     const w = $('shot-warnings');
     w.innerHTML = '';
-    sel.warnings.forEach((m) => { const li = document.createElement('li'); li.textContent = m; w.appendChild(li); });
+    const note = (m, cls) => { const li = document.createElement('li'); li.textContent = m; if (cls) li.className = cls; w.appendChild(li); };
+    sel.warnings.forEach((m) => note(m));
+    if (sel.retimed) note('Remappage temporel ou étirement pris en compte : le suivi porte sur les images telles que la compo les montre.', 'note');
     $('summary').innerHTML = '';
     $('apply-msg').classList.add('hidden');
-    $('result-actions').classList.add('hidden');
-    $('frame-label').textContent = '—';
+    $('log').textContent = '';
 
     $('btn-load').disabled = true;
     try {
-      const [fr, info] = await Promise.all([
-        runEngine(['frame', sel.file, String(sel.frame), path.join(state.workDir, 'ref.jpg')]),
-        runEngine(['info', sel.file]).catch(() => ({ lens: null })),
-      ]);
+      fs.mkdirSync(state.workDir, { recursive: true });
+      const seq = path.join(state.workDir, 'seq.json');
+      fs.writeFileSync(seq, JSON.stringify({ src: sel.frames, fps: sel.compFps, start: sel.seqStart }));
+      const ready = new Promise((resolve) => {
+        state.eng = startEngine([sel.file, seq, state.thumbsDir], (ev) => {
+          if (ev.type === 'ready') resolve(ev); else onEngineEvent(ev);
+        });
+      });
+      const info = await ready;
+      state.W = info.width;
+      state.H = info.height;
       state.lensMm = info.lens ? info.lens.focal35_mm : null;
       $('focal-wrap').classList.toggle('hidden', !!state.lensMm);
-      await loadImage(fr.path);
       enable('s-surface', true);
-      enable('s-track', true);
-      setupBrowse();
+      await loadFull(state.k);
+      fitView();
     } catch (e) {
       toast(e.message);
     } finally {
@@ -204,13 +304,44 @@
     }
   }
 
-  function loadImage(p) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => { state.img = img; fitView(); resolve(); };
-      img.onerror = () => reject(new Error("Impossible d'afficher l'image : " + p));
-      img.src = p.indexOf('demo') === 0 ? p : fileUrl(p);
-    });
+  // ------------------------------------------------------------------ images
+  function thumbPath(k) { return path.join(state.thumbsDir, pad5(state.shot.frames[k]) + '.jpg'); }
+
+  /** Image pleine résolution de l'image k (cache de quelques images). */
+  async function loadFull(k) {
+    if (state.full.has(k)) return state.full.get(k);
+    let img;
+    if (!inCEP) img = await loadImg('demo.jpg');
+    else {
+      const out = path.join(state.workDir, 'frames', pad5(state.shot.frames[k]) + '.jpg');
+      const r = await state.eng.send({ cmd: 'frame', k, out });
+      img = await loadImg(fileUrl(r.path));
+    }
+    state.full.set(k, img);
+    if (state.full.size > 8) state.full.delete(state.full.keys().next().value);
+    if (state.k === k) { state.cur = img; state.curThumbMissing = false; draw(); }
+    return img;
+  }
+
+  let fullTimer = null;
+  /** Affiche l'image k : pleine résolution si en cache, sinon la vignette (puis la pleine résolution). */
+  function showFrame(k, opts) {
+    opts = opts || {};
+    state.k = k;
+    const f = state.full.get(k);
+    if (f) { state.cur = f; state.curThumbMissing = false; }
+    else if (inCEP) {
+      const p = thumbPath(k);
+      if (state.shot.frames[k] <= state.loadedUpto && fs.existsSync(p)) {
+        state.curThumbMissing = false;
+        loadImg(fileUrl(p)).then((img) => { if (state.k === k && !state.full.has(k)) { state.cur = img; draw(); } }).catch(() => {});
+      } else state.curThumbMissing = true;
+      if (!opts.fast && !state.tracking) {
+        clearTimeout(fullTimer);
+        fullTimer = setTimeout(() => { if (state.k === k && state.eng) loadFull(k).catch(() => {}); }, 150);
+      }
+    }
+    refresh();
   }
 
   // ------------------------------------------------------------------ géométrie
@@ -245,6 +376,19 @@
   function warp(H, x, y) {
     const w = H[2][0] * x + H[2][1] * y + H[2][2];
     return [(H[0][0] * x + H[0][1] * y + H[0][2]) / w, (H[1][0] * x + H[1][1] * y + H[1][2]) / w];
+  }
+  /** Homographie à plat (9 nombres) appliquée à un point. */
+  function warp9(h, p) {
+    const w = h[6] * p[0] + h[7] * p[1] + h[8];
+    return [(h[0] * p[0] + h[1] * p[1] + h[2]) / w, (h[3] * p[0] + h[4] * p[1] + h[5]) / w];
+  }
+  function inv9(m) {
+    const [a, b, c, d, e, f, g, h, i] = m;
+    const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+    const det = a * A + b * B + c * C;
+    return [A / det, -(b * i - c * h) / det, (b * f - c * e) / det,
+      B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
+      C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
   }
 
   /** Contour du rectangle arrondi (même construction que le moteur : arcs dans le carré unité). */
@@ -281,18 +425,17 @@
   /** Focale en pixels : saisie > métadonnées > 50 mm (éq. 24x36, 36 mm = grand côté). */
   function focalPx() {
     const mm = parseFloat($('in-focal').value) || state.lensMm || 50;
-    return mm / 36 * Math.max(state.img.width, state.img.height);
+    return mm / 36 * Math.max(state.W, state.H);
   }
   function ray(p) { // direction (repère caméra) du pixel p
     const f = focalPx();
-    return norm([(p[0] - state.img.width / 2) / f, (p[1] - state.img.height / 2) / f, 1]);
+    return norm([(p[0] - state.W / 2) / f, (p[1] - state.H / 2) / f, 1]);
   }
-  function project(X) {
-    const f = focalPx();
-    return [state.img.width / 2 + f * X[0] / X[2], state.img.height / 2 + f * X[1] / X[2]];
-  }
+  function projectF(X, f) { return [state.W / 2 + f * X[0] / X[2], state.H / 2 + f * X[1] / X[2]]; }
+  function project(X) { return projectF(X, focalPx()); }
 
-  const isDisc = () => state.tool === 'rect' && +$('in-round').value >= 100;
+  const isDisc = () => state.tool === 'rect' && state.round >= 100;
+  const hasTrack = () => Object.keys(state.Hs).some((k) => +k !== state.ref);
 
   function rotate(v, axis, ang) { // rotation de Rodrigues autour d'un axe unitaire
     const c = Math.cos(ang), s = Math.sin(ang), k = dot(axis, v);
@@ -300,11 +443,11 @@
   }
 
   /** Modèle 3D du rectangle déduit des 4 coins : X(a, b) = C + a·eu + b·ev, a et b dans [-½, ½]. */
-  function rectModel() {
-    if (state.points.length !== 4) return null;
-    const H = squareHomography(orderRect(state.points));
+  function rectModel(points) {
+    if (points.length !== 4) return null;
+    const H = squareHomography(orderRect(points));
     if (!H) return null;
-    const f = focalPx(), cx = state.img.width / 2, cy = state.img.height / 2;
+    const f = focalPx(), cx = state.W / 2, cy = state.H / 2;
     const col = (j) => [(H[0][j] - cx * H[2][j]) / f, (H[1][j] - cy * H[2][j]) / f, H[2][j]];
     const eu = col(0), ev = col(1);
     return { C: add(add(scale(eu, 0.5), scale(ev, 0.5)), col(2)), eu, ev };
@@ -314,18 +457,19 @@
     return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => project(add(m.C, add(scale(m.eu, a / 2), scale(m.ev, b / 2)))));
   }
 
-  /** Repère 3D de la surface sur l'image de référence (comme dans l'aperçu après tracking) :
-   *  {C, x, y, n (vers l'arrière-plan), model (rectangle) ou grid [a0, a1, b0, b1] (forme libre), auto}. */
+  /** Repère 3D de la surface sur l'image de référence, déduit de la forme :
+   *  {C, x, y, n (vers l'arrière-plan), P(a, b) point de la surface, L taille des axes, auto}. */
   function gizmo() {
-    if (!state.img || !ready()) return null;
+    if (!state.W || !ready()) return null;
     if (state.tool === 'rect') {
-      const m = rectModel();
+      const m = rectModel(state.points);
       if (!m) return null;
       let n = norm(cross(m.eu, m.ev));
       if (dot(n, m.C) < 0) n = scale(n, -1);
       if (isDisc() && state.flip) { const d = norm(m.C); n = norm(add(scale(d, 2 * dot(n, d)), scale(n, -1))); }
       const x = norm(add(m.eu, scale(n, -dot(m.eu, n)))), y = cross(n, x);
-      return { C: m.C, x, y, n, model: m };
+      return { C: m.C, x, y, n, model: m, P: (a, b) => add(m.C, add(scale(m.eu, a), scale(m.ev, b))),
+        L: 0.5 * Math.min(Math.hypot(...m.eu), Math.hypot(...m.ev)) };
     }
     const pts = state.points;
     const center = [pts.reduce((a, p) => a + p[0], 0) / pts.length, pts.reduce((a, p) => a + p[1], 0) / pts.length];
@@ -338,7 +482,8 @@
       a0 = Math.min(a0, dot(D, x)); a1 = Math.max(a1, dot(D, x));
       b0 = Math.min(b0, dot(D, y)); b1 = Math.max(b1, dot(D, y));
     });
-    return { C, x, y, n, grid: [a0, a1, b0, b1], auto: !state.orientManual };
+    return { C, x, y, n, auto: !state.orientManual, L: 0.5 * Math.min(a1 - a0, b1 - b0),
+      P: (a, b) => add(C, add(scale(x, a0 + (a + 0.5) * (a1 - a0)), scale(y, b0 + (b + 0.5) * (b1 - b0)))) };
   }
 
   /** Normale à transmettre au moteur (disque : tranche entre les 2 inclinaisons ; forme libre : réglage manuel). */
@@ -348,28 +493,95 @@
     return g.n;
   }
 
+  /** Forme à l'image k : sur la référence telle quelle, ailleurs transportée par le suivi (null si non trackée). */
+  function shapeAt(k) {
+    if (k === state.ref || !hasTrack()) return state.points;
+    const h = state.Hs[k];
+    return h ? state.points.map((p) => warp9(h, p)) : null;
+  }
+  const editable = () => !state.tracking && !!shapeAt(state.k);
+
+  // ------------------------------------------------------------------ annuler / rétablir
+  function snapshot() {
+    return {
+      tool: state.tool, points: state.points.map((p) => p.slice()), round: state.round, flip: state.flip,
+      orientManual: state.orientManual, freeNormal: state.freeNormal, ref: state.ref,
+      Hs: state.Hs, conf: state.conf, focal: $('in-focal').value, rev: state.rev,
+    };
+  }
+  function sameSnap(a, b) {
+    const light = (s) => JSON.stringify([s.tool, s.points, s.round, s.flip, s.orientManual, s.freeNormal, s.ref, s.focal]);
+    return a.Hs === b.Hs && light(a) === light(b);
+  }
+  let pendingSnap = null;
+  /** Début d'une action annulable (l'état d'avant est mémorisé). */
+  function beginAction() { if (!pendingSnap) pendingSnap = snapshot(); }
+  /** Fin de l'action : elle entre dans l'historique si elle a changé quelque chose. */
+  function endAction() {
+    if (!pendingSnap) return;
+    const before = pendingSnap;
+    pendingSnap = null;
+    if (sameSnap(before, snapshot())) {  // rien de changé : la 3D reste valable
+      if (state.pose && state.pose.rev !== state.rev && state.pose.rev === before.rev) state.pose.rev = state.rev;
+      return;
+    }
+    state.undo.push(before);
+    if (state.undo.length > 200) state.undo.shift();
+    state.redo = [];
+    changed();
+  }
+  function act(fn) { beginAction(); fn(); endAction(); refresh(); }
+
+  function restore(s) {
+    const refMoved = s.ref !== state.ref;
+    Object.assign(state, {
+      tool: s.tool, points: s.points.map((p) => p.slice()), round: s.round, flip: s.flip,
+      orientManual: s.orientManual, freeNormal: s.freeNormal, ref: s.ref, Hs: s.Hs, conf: s.conf,
+    });
+    $('in-focal').value = s.focal;
+    syncControls();
+    changed();
+    if (refMoved || (!hasTrack() && state.k !== state.ref)) { showFrame(state.ref); syncAE(state.ref); } else refresh();
+  }
+  function undo() {
+    if (state.tracking || !state.undo.length) return;
+    pendingSnap = null;
+    state.redo.push(snapshot());
+    restore(state.undo.pop());
+  }
+  function redo() {
+    if (state.tracking || !state.redo.length) return;
+    pendingSnap = null;
+    state.undo.push(snapshot());
+    restore(state.redo.pop());
+  }
+
+  /** Une modification a eu lieu : la 3D est à recalculer. */
+  function changed() {
+    state.rev++;
+    scheduleSolve();
+  }
+
+  function syncControls() {
+    document.querySelectorAll('#toolbar [data-tool]').forEach((x) => x.classList.toggle('on', x.dataset.tool === state.tool));
+    $('in-round').value = String(state.round);
+  }
+
   // ------------------------------------------------------------------ éditeur
   const canvas = $('view');
   const ctx = canvas.getContext('2d');
-
-  function shownImage() {
-    if (state.show === 'live' && state.live) return state.live.img;
-    if (state.show === 'browse' && state.browseImg) return state.browseImg;
-    return state.show === 'result' && state.previewImg ? state.previewImg : state.img;
-  }
+  const DPR = () => window.devicePixelRatio || 1;
 
   function fitView() {
-    const img = state.img;
-    if (!img) return;
+    if (!state.W) return;
     resizeCanvas();
-    const s = Math.min(canvas.width / img.width, canvas.height / img.height) * 0.98;
-    state.view = { s, ox: (canvas.width - img.width * s) / 2, oy: (canvas.height - img.height * s) / 2, fit: s };
+    const s = Math.min(canvas.width / state.W, canvas.height / state.H) * 0.98;
+    state.view = { s, ox: (canvas.width - state.W * s) / 2, oy: (canvas.height - state.H * s) / 2, fit: s };
     draw();
   }
 
   function resizeCanvas() {
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+    const w = Math.round(canvas.clientWidth * DPR()), h = Math.round(canvas.clientHeight * DPR());
     if (canvas.width !== w || canvas.height !== h) {
       const v = state.view;
       if (v && canvas.width) { v.ox += (w - canvas.width) / 2; v.oy += (h - canvas.height) / 2; }
@@ -383,14 +595,16 @@
 
   function canvasXY(ev) {
     const r = canvas.getBoundingClientRect();
-    const dpr = canvas.width / r.width;
-    return [(ev.clientX - r.left) * dpr, (ev.clientY - r.top) * dpr];
+    const k = canvas.width / r.width;
+    return [(ev.clientX - r.left) * k, (ev.clientY - r.top) * k];
   }
 
   function hitPoint(x, y) {
-    const R = 9 * (window.devicePixelRatio || 1);
+    const pts = editable() ? shapeAt(state.k) : null;
+    if (!pts) return -1;
+    const R = 10 * DPR();
     let best = -1, bd = R;
-    state.points.forEach((p, i) => {
+    pts.forEach((p, i) => {
       const [sx, sy] = toScreen(p);
       const d = Math.hypot(sx - x, sy - y);
       if (d < bd) { bd = d; best = i; }
@@ -408,34 +622,36 @@
     if (close) ctx.closePath();
   }
 
+  let drawQueued = false;
   function draw() {
+    if (drawQueued) return;
+    drawQueued = true;
+    requestAnimationFrame(() => { drawQueued = false; drawNow(); });
+  }
+
+  function drawNow() {
     resizeCanvas();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const img = shownImage();
+    const img = state.cur;
     $('canvas-empty').classList.toggle('hidden', !!img);
+    drawTimeline();
     if (!img || !state.view) return;
     const v = state.view;
-    const k = state.img.width / img.width; // aperçus réduits : même cadre que l'image de référence
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, v.ox, v.oy, img.width * k * v.s, img.height * k * v.s);
-    if (state.show === 'edit') drawShape();
-    if (state.show === 'live' && state.live && state.live.poly.length) {
-      polyPath(state.live.poly.map((p) => [p[0] * k, p[1] * k]), true);
-      ctx.lineWidth = 2 * (window.devicePixelRatio || 1);
-      ctx.strokeStyle = '#3ce07a';
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(60, 224, 122, 0.12)';
-      ctx.fill();
-    }
+    ctx.drawImage(img, v.ox, v.oy, state.W * v.s, state.H * v.s);  // vignettes : même cadre que la vidéo
+    drawShape();
   }
 
   function drawShape() {
-    const dpr = window.devicePixelRatio || 1;
-    const pts = state.points, ok = ready();
-    const shape = state.tool === 'rect' && ok ? roundedOutline(orderRect(pts), +$('in-round').value / 100) : pts;
-    if (state.tool === 'rect' && ok && +$('in-round').value > 0) { // rectangle « pointu » en pointillés
+    const dpr = DPR(), k = state.k;
+    const pts = shapeAt(k);
+    if (!pts) return;
+    const ok = ready(), canEdit = editable();
+    const rectPts = state.tool === 'rect' && pts.length === 4 ? orderRect(pts) : null;
+    const shape = rectPts && ok ? roundedOutline(rectPts, state.round / 100) : pts;
+    if (rectPts && ok && state.round > 0) { // rectangle « pointu » en pointillés
       ctx.setLineDash([4 * dpr, 4 * dpr]);
-      polyPath(orderRect(pts), true);
+      polyPath(rectPts, true);
       ctx.lineWidth = 1 * dpr;
       ctx.strokeStyle = 'rgba(240, 192, 64, 0.7)';
       ctx.stroke();
@@ -446,87 +662,146 @@
       ctx.lineWidth = 1.5 * dpr;
       ctx.strokeStyle = ok ? '#3ce07a' : '#f0c040';
       ctx.stroke();
-      if (ok) { ctx.fillStyle = 'rgba(60, 224, 122, 0.10)'; ctx.fill(); }
+      if (ok) { ctx.fillStyle = 'rgba(60, 224, 122, 0.08)'; ctx.fill(); }
     }
-    if (ok) drawGizmo();
+    if (ok) drawSurface3D();
+    if (!canEdit && state.tracking) return;
     const labels = ['HG', 'HD', 'BD', 'BG'];
-    const ordered = state.tool === 'rect' && pts.length === 4 ? orderRect(pts) : null;
     pts.forEach((p, i) => {
       const [x, y] = toScreen(p);
       ctx.beginPath();
-      ctx.arc(x, y, (i === state.hover ? 6 : 4.5) * dpr, 0, 2 * Math.PI);
+      ctx.arc(x, y, (i === state.hover ? 6.5 : 5) * dpr, 0, 2 * Math.PI);
       ctx.fillStyle = i === state.hover ? '#ffffff' : '#3ce07a';
       ctx.fill();
       ctx.strokeStyle = '#000';
       ctx.lineWidth = 1 * dpr;
       ctx.stroke();
-      if (ordered) {
-        ctx.font = `${10 * dpr}px -apple-system, sans-serif`;
+      if (rectPts) {
+        ctx.font = `${11 * dpr}px -apple-system, sans-serif`;
         ctx.fillStyle = '#fff';
-        ctx.fillText(labels[ordered.indexOf(p)], x + 7 * dpr, y - 7 * dpr);
+        ctx.fillText(labels[rectPts.indexOf(p)], x + 8 * dpr, y - 8 * dpr);
       }
     });
-    if (state.drag && state.drag.kind === 'point') drawLoupe(state.points[state.drag.i]);
+    if (state.drag && state.drag.kind === 'point') drawLoupe(shapeAt(k)[state.drag.i]);
   }
 
-  /** Grille 3D sur la surface + axes (X rouge, Y vert, Z bleu vers la caméra) + poignée de rotation. */
-  function drawGizmo() {
-    const g = gizmo();
-    if (!g) return;
-    const dpr = window.devicePixelRatio || 1;
-    const P = (a, b) => (g.model ? add(g.model.C, add(scale(g.model.eu, a), scale(g.model.ev, b)))
-      : add(g.C, add(scale(g.x, a), scale(g.y, b))));
-    let a0 = -0.5, a1 = 0.5, b0 = -0.5, b1 = 0.5;
-    if (g.grid) [a0, a1, b0, b1] = g.grid;
+  /** Pose calculée à l'image k, si elle est à jour. */
+  function poseAt(k) {
+    const p = state.pose;
+    return p && p.rev === state.rev && p.poses && p.poses[k] ? p.poses[k] : null;
+  }
+
+  /** Grille 3D + axes : la pose calculée si elle est à jour, sinon (référence) celle déduite de la forme. */
+  function drawSurface3D() {
+    const k = state.k, ps = poseAt(k);
+    let P, proj, C, axes, L, disc = isDisc(), outline = null, faint = false;
+    if (ps) {
+      const R = ps.R, t = ps.t, [w, h] = state.pose.size;
+      P = (a, b) => [R[0] * a * w + R[1] * b * h + t[0], R[3] * a * w + R[4] * b * h + t[1], R[6] * a * w + R[7] * b * h + t[2]];
+      proj = (X) => projectF(X, ps.f);
+      C = t;
+      axes = [[R[0], R[3], R[6]], [R[1], R[4], R[7]], [-R[2], -R[5], -R[8]]];
+      L = 0.5 * Math.min(w, h);
+      disc = state.pose.kind === 'disc';
+      outline = state.pose.outline;
+    } else if (k === state.ref || !hasTrack()) {
+      const g = gizmo();
+      if (!g) return;
+      P = g.P; proj = project; C = g.C; axes = [g.x, g.y, scale(g.n, -1)]; L = g.L; faint = !!g.auto;
+    } else return;
+    const dpr = DPR();
     ctx.lineWidth = 1 * dpr;
-    ctx.strokeStyle = g.auto ? 'rgba(0, 220, 255, 0.25)' : 'rgba(0, 220, 255, 0.7)';
+    ctx.strokeStyle = faint ? 'rgba(0, 220, 255, 0.25)' : 'rgba(0, 220, 255, 0.7)';
     for (let i = 0; i <= 8; i++) {
-      const a = a0 + (a1 - a0) * i / 8, b = b0 + (b1 - b0) * i / 8;
-      polyPath([project(P(a, b0)), project(P(a, b1))]); ctx.stroke();
-      polyPath([project(P(a0, b)), project(P(a1, b))]); ctx.stroke();
+      const a = -0.5 + i / 8;
+      polyPath([proj(P(a, -0.5)), proj(P(a, 0.5))]); ctx.stroke();
+      polyPath([proj(P(-0.5, a)), proj(P(0.5, a))]); ctx.stroke();
     }
-    const size = g.model ? Math.min(Math.hypot(...g.model.eu), Math.hypot(...g.model.ev))
-      : Math.min(a1 - a0, b1 - b0);
-    const L = 0.5 * size;
-    const o = toScreen(project(g.C));
-    [[g.x, '#ff4d4d'], [g.y, '#3ce07a'], [scale(g.n, -1), '#4aa3ff']].forEach(([axis, col]) => {
-      const e = toScreen(project(add(g.C, scale(axis, L))));
+    if (disc || outline) {
+      const ring = disc ? Array.from({ length: 73 }, (_, i) => { const a = i / 72 * 2 * Math.PI; return proj(P(0.5 * Math.cos(a), 0.5 * Math.sin(a))); })
+        : outline.map(([u, v]) => proj(P(u - 0.5, v - 0.5)));
+      polyPath(ring, true);
+      ctx.lineWidth = 2 * dpr;
+      ctx.strokeStyle = 'rgba(0, 220, 255, 0.9)';
+      ctx.stroke();
+    }
+    const o = toScreen(proj(C));
+    [[axes[0], '#ff4d4d'], [axes[1], '#3ce07a'], [axes[2], '#4aa3ff']].forEach(([axis, col]) => {
+      const e = toScreen(proj(add(C, scale(axis, L))));
       ctx.lineWidth = 2.5 * dpr;
       ctx.strokeStyle = col;
       ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
-      const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 8 * dpr;
+      const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 9 * dpr;
       ctx.beginPath();
       ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang - 0.4), e[1] - hl * Math.sin(ang - 0.4));
       ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang + 0.4), e[1] - hl * Math.sin(ang + 0.4));
       ctx.stroke();
     });
-    ctx.beginPath(); // poignée : glisser pour tourner la surface
-    ctx.arc(o[0], o[1], 7 * dpr, 0, 2 * Math.PI);
-    ctx.fillStyle = state.drag && state.drag.kind === 'rotate' ? '#ffffff' : 'rgba(255,255,255,0.85)';
-    ctx.fill();
-    ctx.lineWidth = 1.5 * dpr;
-    ctx.strokeStyle = '#000';
-    ctx.stroke();
+    if (ringsShown()) drawRings();
   }
 
-  function hitGizmo(x, y) {
+  // ---- gizmo de rotation : un anneau par axe (X rouge, Y vert, Z bleu), comme dans AE
+  const RING_COLORS = { x: '#ff4d4d', y: '#3ce07a', z: '#4aa3ff' };
+  function ringsShown() { return !state.tracking && state.k === state.ref && ready() && !!gizmo(); }
+
+  /** Anneaux en 3D autour du centre de la surface : axe de rotation + points projetés à l'écran. */
+  function rings() {
     const g = gizmo();
-    if (!g) return false;
-    const o = toScreen(project(g.C));
-    return Math.hypot(o[0] - x, o[1] - y) < 11 * (window.devicePixelRatio || 1);
+    if (!g) return [];
+    const r = 1.15 * g.L, out = [];
+    const defs = [['x', g.x, g.y, g.n], ['y', g.y, g.x, g.n]];
+    if (state.tool === 'rect') defs.push(['z', g.n, g.x, g.y]);  // forme libre : tourner dans le plan ne change rien
+    defs.forEach(([id, axis, u, v]) => {
+      const P3 = (a) => add(g.C, add(scale(u, r * Math.cos(a)), scale(v, r * Math.sin(a))));
+      const pts = [];
+      for (let i = 0; i <= 72; i++) pts.push(toScreen(project(P3(i / 72 * 2 * Math.PI))));
+      out.push({ id, axis, P3, pts });
+    });
+    return out;
+  }
+
+  function drawRings() {
+    const dpr = DPR(), active = state.drag && state.drag.kind === 'ring' ? state.drag.id : null;
+    rings().forEach((rg) => {
+      const hot = rg.id === active || (!active && rg.id === state.hoverRing);
+      ctx.beginPath();
+      rg.pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+      ctx.lineWidth = (hot ? 4 : 2) * dpr;
+      ctx.strokeStyle = RING_COLORS[rg.id];
+      ctx.globalAlpha = active && !hot ? 0.25 : hot ? 1 : 0.75;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    });
+  }
+
+  /** Anneau sous la souris : {ring, i} (i : indice du point le plus proche) ou null. */
+  function hitRing(x, y) {
+    if (!ringsShown()) return null;
+    let best = null, bd = 7 * DPR();
+    rings().forEach((rg) => {
+      for (let i = 0; i < rg.pts.length - 1; i++) {
+        const [ax, ay] = rg.pts[i], [bx, by] = rg.pts[i + 1];
+        const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1;
+        const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2));
+        const d = Math.hypot(ax + u * dx - x, ay + u * dy - y);
+        if (d < bd) { bd = d; best = { ring: rg, i }; }
+      }
+    });
+    return best;
   }
 
   /** Loupe x4 autour du point déplacé, dans le coin opposé. */
   function drawLoupe(p) {
-    const dpr = window.devicePixelRatio || 1;
-    const size = 130 * dpr, zoom = 4;
+    const img = state.cur;
+    if (!img || !p) return;
+    const dpr = DPR(), size = 140 * dpr, zoom = 4, k = img.width / state.W;
     const [sx] = toScreen(p);
     const dx = sx < canvas.width / 2 ? canvas.width - size - 8 * dpr : 8 * dpr, dy = 8 * dpr;
     const src = size / (zoom * state.view.s);
     ctx.save();
     ctx.fillStyle = '#000';
     ctx.fillRect(dx - 1, dy - 1, size + 2, size + 2);
-    ctx.drawImage(state.img, p[0] - src / 2, p[1] - src / 2, src, src, dx, dy, size, size);
+    ctx.drawImage(img, (p[0] - src / 2) * k, (p[1] - src / 2) * k, src * k, src * k, dx, dy, size, size);
     ctx.strokeStyle = '#3ce07a';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -537,74 +812,95 @@
     ctx.restore();
   }
 
+  /** Remet un point déplacé à l'image k dans le repère de la référence. */
+  function toRef(p) {
+    if (state.k === state.ref || !hasTrack()) return p;
+    return warp9(inv9(state.Hs[state.k]), p);
+  }
+
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   canvas.addEventListener('mousedown', (ev) => {
-    if (!state.img || !state.view) return;
+    if (!state.cur || !state.view) return;
+    stopPlay();
     const [x, y] = canvasXY(ev);
-    const hit = state.show === 'edit' ? hitPoint(x, y) : -1;
+    const hit = ev.button === 0 || ev.button === 2 ? hitPoint(x, y) : -1;
     if (ev.button === 2 && hit >= 0) { // clic droit sur un point : supprimer
-      state.points.splice(hit, 1);
-      invalidateResult();
-      refresh();
+      act(() => { state.points.splice(hit, 1); });
       return;
     }
-    if (ev.button === 1 || ev.button === 2 || state.space || state.show !== 'edit') {
+    if (ev.button === 1 || ev.button === 2 || state.space || !editable()) {
       state.drag = { kind: 'pan', x, y };
       canvas.classList.add('pan');
       return;
     }
-    if (hit < 0 && ev.button === 0 && hitGizmo(x, y)) { // tourner la surface en 3D
-      const g = gizmo();
-      state.drag = { kind: 'rotate', x0: x, y0: y, model: g.model, n0: g.n };
+    const ring = hit < 0 ? hitRing(x, y) : null;
+    if (ring) { // tourner la surface autour d'un de ses axes
+      const g = gizmo(), rg = ring.ring;
+      const a = ring.i / 72 * 2 * Math.PI, eps = 0.01;
+      const p0 = toScreen(project(rg.P3(a))), p1 = toScreen(project(rg.P3(a + eps)));
+      let tx = (p1[0] - p0[0]) / eps, ty = (p1[1] - p0[1]) / eps;  // pixels par radian le long de l'anneau
+      const tl = Math.hypot(tx, ty);
+      if (tl < 30 * DPR()) { const s = 30 * DPR() / (tl || 1); tx *= s; ty *= s; }  // anneau vu par la tranche
+      beginAction();
+      if (isDisc() && state.flip) state.flip = false;  // la rotation à la main remplace l'inversion
+      state.drag = { kind: 'ring', id: rg.id, axis: rg.axis, x0: x, y0: y, tx, ty, model: g.model, n0: g.n };
+      draw();
       return;
     }
+    beginAction();
     if (hit >= 0) {
       state.drag = { kind: 'point', i: hit };
+    } else if (state.k !== state.ref && hasTrack()) {
+      pendingSnap = null;
+      toast('Les points s\'ajoutent sur l\'image de référence. Ici, glissez les points existants pour corriger.', 3500);
+      return;
     } else {
       if (state.tool === 'rect' && state.points.length >= 4) {
+        pendingSnap = null;
         toast('Le rectangle a déjà 4 coins : glissez-les pour les ajuster, ou effacez-les.', 3500);
         return;
       }
       state.points.push(toImage(x, y));
       state.drag = { kind: 'point', i: state.points.length - 1 };
+      state.rev++;
     }
-    invalidateResult();
     refresh();
   });
 
   window.addEventListener('mousemove', (ev) => {
     if (!state.view) return;
     const [x, y] = canvasXY(ev);
-    if (state.drag && state.drag.kind === 'point') {
+    const d = state.drag;
+    if (d && d.kind === 'point') {
       const p = toImage(x, y);
-      p[0] = Math.max(0, Math.min(state.img.width, p[0]));
-      p[1] = Math.max(0, Math.min(state.img.height, p[1]));
-      state.points[state.drag.i] = p;
+      p[0] = Math.max(0, Math.min(state.W, p[0]));
+      p[1] = Math.max(0, Math.min(state.H, p[1]));
+      state.points[d.i] = toRef(p);
+      state.rev++;
       draw();
-    } else if (state.drag && state.drag.kind === 'rotate') {
-      const d = state.drag, dpr = window.devicePixelRatio || 1, k = 0.008 / dpr;
-      const turn = ev.shiftKey  // Maj : rotation dans le plan de la surface
-        ? (v) => rotate(v, d.n0, (x - d.x0) * k)
-        : (v) => rotate(rotate(v, [0, 1, 0], (x - d.x0) * k), [1, 0, 0], -(y - d.y0) * k);
+    } else if (d && d.kind === 'ring') {
+      const ang = ((x - d.x0) * d.tx + (y - d.y0) * d.ty) / (d.tx * d.tx + d.ty * d.ty);
       if (d.model) { // rectangle / disque : les coins suivent la rotation
-        state.points = cornersOf({ C: d.model.C, eu: turn(d.model.eu), ev: turn(d.model.ev) });
+        state.points = cornersOf({ C: d.model.C, eu: rotate(d.model.eu, d.axis, ang), ev: rotate(d.model.ev, d.axis, ang) });
       } else {
-        state.freeNormal = norm(turn(d.n0));
+        state.freeNormal = norm(rotate(d.n0, d.axis, ang));
         state.orientManual = true;
       }
-      invalidateResult();
+      state.rev++;
       draw();
-    } else if (state.drag && state.drag.kind === 'pan') {
-      state.view.ox += x - state.drag.x;
-      state.view.oy += y - state.drag.y;
-      state.drag.x = x;
-      state.drag.y = y;
+    } else if (d && d.kind === 'pan') {
+      state.view.ox += x - d.x;
+      state.view.oy += y - d.y;
+      d.x = x;
+      d.y = y;
       draw();
-    } else if (ev.target === canvas && state.show === 'edit') {
+    } else if (ev.target === canvas) {
       const h = hitPoint(x, y);
-      canvas.style.cursor = h < 0 && hitGizmo(x, y) ? 'move' : '';
-      if (h !== state.hover) { state.hover = h; draw(); }
+      const r = h < 0 ? hitRing(x, y) : null;
+      const rid = r ? r.ring.id : null;
+      canvas.style.cursor = rid ? 'grab' : '';
+      if (h !== state.hover || rid !== state.hoverRing) { state.hover = h; state.hoverRing = rid; draw(); }
     }
   });
 
@@ -612,6 +908,7 @@
     if (!state.drag) return;
     state.drag = null;
     canvas.classList.remove('pan');
+    endAction();
     refresh();
   });
 
@@ -632,13 +929,20 @@
     if (hitPoint(x, y) < 0) fitView();
   });
 
+  // ------------------------------------------------------------------ clavier
   window.addEventListener('keydown', (ev) => {
-    if (ev.target.tagName === 'INPUT') return;
+    const mod = ev.metaKey || ev.ctrlKey;
+    if (mod && (ev.key === 'z' || ev.key === 'Z')) { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
+    if (mod && (ev.key === 'y' || ev.key === 'Y')) { ev.preventDefault(); redo(); return; }
+    if (ev.target.tagName === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox') return;
     if (ev.code === 'Space') { state.space = true; canvas.classList.add('pan'); ev.preventDefault(); }
-    if ((ev.key === 'Backspace' || ev.key === 'Delete') && state.show === 'edit' && state.points.length) {
-      state.points.pop();
-      invalidateResult();
-      refresh();
+    if ((ev.key === 'Backspace' || ev.key === 'Delete') && editable() && state.points.length) {
+      act(() => { state.points.pop(); });
+      ev.preventDefault();
+    }
+    if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && state.n && !state.tracking) {
+      const step = (ev.key === 'ArrowLeft' ? -1 : 1) * (ev.shiftKey ? 10 : 1);
+      goTo(Math.max(0, Math.min(state.n - 1, state.k + step)), true);
       ev.preventDefault();
     }
   });
@@ -646,301 +950,286 @@
     if (ev.code === 'Space') { state.space = false; if (!state.drag) canvas.classList.remove('pan'); }
   });
   window.addEventListener('resize', draw);
+  if (inCEP) {
+    // ⌘Z / ⇧⌘Z / ←→ : pour le panneau plutôt que pour AE (codes de touches macOS)
+    try {
+      window.__adobe_cep__.registerKeyEventsInterest(JSON.stringify([
+        { keyCode: 6, metaKey: true }, { keyCode: 6, metaKey: true, shiftKey: true },
+        { keyCode: 123 }, { keyCode: 124 }, { keyCode: 123, shiftKey: true }, { keyCode: 124, shiftKey: true },
+        { keyCode: 51 }, { keyCode: 117 }, { keyCode: 49 },
+      ]));
+    } catch (e) { /* ancienne version de CEP */ }
+  }
 
   // ------------------------------------------------------------------ outils
   document.querySelectorAll('#toolbar [data-tool]').forEach((b) => b.addEventListener('click', () => {
-    if (state.child || b.dataset.tool === state.tool) return;
-    document.querySelectorAll('#toolbar [data-tool]').forEach((x) => x.classList.toggle('on', x === b));
-    state.tool = b.dataset.tool;
-    state.points = [];
-    state.show = 'edit';
-    invalidateResult();
-    refresh();
+    if (state.tracking || b.dataset.tool === state.tool) return;
+    act(() => {
+      state.tool = b.dataset.tool;
+      state.points = [];
+      state.Hs = {};
+      state.conf = {};
+    });
+    syncControls();
   }));
-  $('in-round').addEventListener('input', () => { invalidateResult(); refresh(); });
-  $('btn-flip').addEventListener('click', () => { state.flip = !state.flip; invalidateResult(); refresh(); });
-  $('btn-orient-auto').addEventListener('click', () => {
-    state.orientManual = false;
-    state.freeNormal = null;
-    invalidateResult();
-    refresh();
-  });
-  $('in-focal').addEventListener('input', () => { invalidateResult(); refresh(); });
+  const round = $('in-round');
+  round.addEventListener('pointerdown', beginAction);
+  round.addEventListener('input', () => { beginAction(); state.round = +round.value; state.rev++; refresh(); });
+  round.addEventListener('change', () => { endAction(); refresh(); });
+  $('btn-flip').addEventListener('click', () => act(() => { state.flip = !state.flip; }));
+  $('btn-orient-auto').addEventListener('click', () => act(() => { state.orientManual = false; state.freeNormal = null; }));
+  const focalIn = $('in-focal');
+  focalIn.addEventListener('focus', beginAction);
+  focalIn.addEventListener('input', () => { beginAction(); state.rev++; refresh(); });
+  focalIn.addEventListener('change', () => { endAction(); refresh(); });
   $('btn-clear').addEventListener('click', () => {
-    if (state.child) return;
-    state.points = [];
-    state.show = 'edit';
-    invalidateResult();
-    refresh();
+    if (state.tracking) return;
+    act(() => { state.points = []; state.Hs = {}; state.conf = {}; });
   });
+  $('btn-clear-track').addEventListener('click', () => {
+    if (state.tracking) return;
+    act(() => { state.Hs = {}; state.conf = {}; });
+  });
+  $('btn-undo').addEventListener('click', undo);
+  $('btn-redo').addEventListener('click', redo);
 
   function refresh() {
-    const n = state.points.length, round = +$('in-round').value;
+    const n = state.points.length, k = state.k, tracked = hasTrack();
     let hint = '';
-    if (state.show === 'result') hint = 'Aperçu du résultat : vert = zone suivie, cyan = surface 3D.';
-    else if (state.show === 'live') hint = 'Suivi en cours : arrêtez dès que la zone verte décroche, ce qui est déjà tracké est gardé.';
-    else if (state.show === 'browse') hint = 'Relâchez sur une image nette où la surface est bien visible : elle devient la référence.';
-    else if (state.img && state.tool === 'rect') {
+    if (state.tracking) hint = 'Suivi en cours : arrêtez (■) dès que la zone verte décroche, ce qui est déjà tracké est gardé.';
+    else if (!state.cur) hint = '';
+    else if (state.scrubbing && !tracked) hint = 'Relâchez sur une image nette où la surface est bien visible : elle devient la référence.';
+    else if (k !== state.ref && tracked && !shapeAt(k)) hint = 'Image non trackée : trackez jusqu\'ici depuis une image trackée.';
+    else if (k !== state.ref && tracked) hint = 'Glissez un point pour corriger la forme (corrige toutes les images). Rotation : sur l\'image de référence (repère jaune).';
+    else if (state.tool === 'rect') {
       hint = n < 4 ? `Cliquez les 4 coins (${n}/4). Arrondi à fond = disque.`
-        : isDisc() ? 'Disque : ajustez les coins pour que le cercle épouse le bord ; ⇅ inverse l\'inclinaison.'
-          : round > 0 ? 'Placez les coins là où les bords droits se rejoindraient (pointillés).'
-            : 'Prêt.';
-      if (n === 4) hint += ' Glissez la poignée blanche pour tourner la surface (Maj : dans son plan).';
-    } else if (state.img) {
+        : isDisc() ? 'Disque : ajustez les coins pour que le cercle épouse le bord.'
+          : state.round > 0 ? 'Placez les coins là où les bords droits se rejoindraient (pointillés).'
+            : 'Prêt à tracker.';
+      if (n === 4) hint += ' Glissez les anneaux pour tourner la surface.';
+    } else {
       hint = n < 3 ? `Cliquez le contour d'une zone plane (${n}/3 min.).`
         : state.orientManual ? 'Grille alignée à la main : elle sera utilisée telle quelle.'
-          : 'Orientation déduite du mouvement au tracking. Pour l\'imposer, glissez la poignée blanche jusqu\'à aligner la grille sur la scène.';
+          : 'Orientation déduite du mouvement. Pour l\'imposer, glissez les anneaux jusqu\'à aligner la grille sur la scène.';
     }
-    if (state.img && state.show === 'edit') hint += ' Molette : zoom · Espace : déplacer · Double-clic : recadrer.';
     $('hint').textContent = hint;
-    $('round-val').textContent = round >= 100 ? 'disque' : `${round} %`;
+    $('round-val').textContent = state.round >= 100 ? 'disque' : `${state.round} %`;
     $('round-wrap').classList.toggle('hidden', state.tool !== 'rect');
     $('btn-flip').classList.toggle('hidden', !isDisc());
     $('btn-flip').classList.toggle('on', state.flip);
     $('orient-wrap').classList.toggle('hidden', !(state.tool === 'free' && state.orientManual));
-    $('btn-track').disabled = !ready() || !!state.child || !inCEP;
-    $('live-badge').classList.toggle('hidden', !((state.show === 'live' && state.live) || state.show === 'browse'));
+    $('btn-undo').disabled = !state.undo.length || !!state.tracking;
+    $('btn-redo').disabled = !state.redo.length || !!state.tracking;
+    $('btn-clear-track').classList.toggle('hidden', !tracked);
+    $('toolbar').classList.toggle('disabled', !!state.tracking);
+
+    // suivi : possible depuis la référence ou une image déjà trackée
+    const canStart = ready() && !!state.eng && !state.tracking && (k === state.ref || !!state.Hs[k]);
+    document.querySelectorAll('.trk').forEach((b) => {
+      const running = state.tracking && state.tracking.btn === b;
+      b.classList.toggle('running', !!running);
+      b.disabled = state.tracking ? !running : !canStart;
+      if (!b.dataset.icon) b.dataset.icon = b.innerHTML;
+      const mode = running ? 'stop' : 'go';
+      if (b.dataset.mode !== mode) {
+        b.dataset.mode = mode;
+        b.innerHTML = running ? '<svg class="solid" viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></svg>' : b.dataset.icon;
+        b.title = running ? 'Arrêter le suivi (les images déjà trackées sont gardées)' : b.dataset.title || b.title;
+      }
+      if (!b.dataset.title) b.dataset.title = b.title;
+    });
+    $('btn-play').disabled = !state.n || !!state.tracking;
+    $('play-path').setAttribute('d', state.playTimer ? 'M7 5h3.5v14H7zM13.5 5H17v14h-3.5z' : 'M7 5l12 7-12 7z');
+    if (state.shot) {
+      $('frame-label').textContent = `${state.shot.seqStart + k}` + (k === state.ref ? ' · réf' : '');
+    }
+    const badge = state.tracking ? `Suivi… image ${state.shot.seqStart + k}`
+      : state.curThumbMissing ? 'Vignettes en préparation…'
+        : (tracked && !shapeAt(k)) ? 'Non trackée' : '';
+    $('badge').textContent = badge;
+    $('badge').classList.toggle('hidden', !badge);
+    enable('s-result', !!state.pose && state.pose.jsx && !state.tracking);
+    $('btn-apply').disabled = !(state.pose && state.pose.jsx && state.pose.rev === state.rev) || state.solving || !!state.tracking;
     draw();
   }
 
-  // ------------------------------------------------------------------ tracking
-  function invalidateResult() {
-    if (!state.result) return;
+  // ------------------------------------------------------------------ timeline
+  const tl = $('timeline');
+  const tctx = tl.getContext('2d');
+  const TL_PAD = 8;
+
+  function tlX(k, w) { const p = TL_PAD * DPR(); return p + (state.n > 1 ? k / (state.n - 1) : 0.5) * (w - 2 * p); }
+
+  function drawTimeline() {
+    const dpr = DPR(), w = Math.round(tl.clientWidth * dpr), h = Math.round(tl.clientHeight * dpr);
+    if (tl.width !== w || tl.height !== h) { tl.width = w; tl.height = h; }
+    tctx.clearRect(0, 0, w, h);
+    if (!state.n || !state.shot) return;
+    const p = TL_PAD * dpr, cw = Math.max(1, (w - 2 * p) / Math.max(1, state.n - 1));
+    tctx.fillStyle = '#1b1b1b';
+    tctx.fillRect(0, 0, w, h);
+    // vignettes prêtes (bande grise en bas)
+    tctx.fillStyle = '#4a4a4a';
+    const src = state.shot.frames;
+    for (let k = 0; k < state.n; k++) if (src[k] <= state.loadedUpto) tctx.fillRect(tlX(k, w) - cw / 2, h - 4 * dpr, cw + 0.5, 3 * dpr);
+    // images trackées (couleur selon la confiance)
+    const y0 = 9 * dpr, y1 = h - 9 * dpr;
+    Object.keys(state.Hs).forEach((key) => {
+      const k = +key, c = state.conf[k] === undefined ? 1 : state.conf[k];
+      tctx.fillStyle = c >= 0.8 ? '#3ce07a' : c >= 0.6 ? '#e0a43a' : '#e0574f';
+      tctx.fillRect(tlX(k, w) - cw / 2, y0, cw + 0.5, y1 - y0);
+    });
+    // référence
+    const xr = tlX(state.ref, w);
+    tctx.fillStyle = '#f0c040';
+    tctx.beginPath(); tctx.moveTo(xr - 5 * dpr, 0); tctx.lineTo(xr + 5 * dpr, 0); tctx.lineTo(xr, 7 * dpr); tctx.fill();
+    // tête de lecture
+    const xk = tlX(state.k, w);
+    tctx.fillStyle = '#ffffff';
+    tctx.fillRect(xk - 1 * dpr, 0, 2 * dpr, h);
+  }
+
+  function tlFrame(ev) {
+    const r = tl.getBoundingClientRect(), x = ev.clientX - r.left;
+    const u = (x - TL_PAD) / Math.max(1, r.width - 2 * TL_PAD);
+    return Math.max(0, Math.min(state.n - 1, Math.round(u * (state.n - 1))));
+  }
+
+  tl.addEventListener('mousedown', (ev) => {
+    if (!state.n || state.tracking) return;
     stopPlay();
-    state.result = null;
-    if (state.show === 'result') state.show = 'edit';
-    $('summary').innerHTML = '';
-    $('result-actions').classList.add('hidden');
-    $('apply-msg').classList.add('hidden');
-    resetTimeline();
-  }
-
-  // ------------------------------------------------------------------ timeline avant tracking
-  /** La timeline parcourt la plage du calque ; relâcher choisit l'image de référence. */
-  function resetTimeline() {
-    const sh = state.shot, sc = $('scrub');
-    if (!sh) return;
-    sc.min = String(sh.rangeStart);
-    sc.max = String(sh.rangeEnd);
-    sc.value = String(sh.frame);
-    sc.disabled = false;
-    $('btn-play').disabled = false;
-    $('frame-label').textContent = `réf ${sh.frame}`;
-  }
-
-  function setupBrowse() {
-    resetTimeline();
-    if (!inCEP) return;
-    const sh = state.shot, dir = path.join(state.workDir, 'thumbs');
-    state.thumbsDir = dir;  // les vignettes apparaissent au fil de l'eau (~6 s pour 200 images 4K)
-    runEngine(['thumbs', sh.file, String(sh.rangeStart), String(sh.rangeEnd), dir], () => {}, false).catch(() => {});
-  }
-
-  function browseTo(i) {
-    $('frame-label').textContent = String(i);
-    const p = state.thumbsDir && path.join(state.thumbsDir, String(i).padStart(5, '0') + '.jpg');
-    if (!p || !fs.existsSync(p)) {
-      $('live-badge').textContent = `Image ${i} — vignettes en préparation…`;
-      return;
-    }
-    $('live-badge').textContent = `Image ${i} — relâchez pour en faire la référence`;
-    const img = new Image();
-    img.onload = () => { state.browseImg = img; if (state.show === 'browse') draw(); };
-    img.src = fileUrl(p);
-  }
-
-  async function setReference(i) {
-    const sh = state.shot;
-    if (sh && i !== sh.frame) {
-      $('live-badge').textContent = `Chargement de l'image ${i}…`;
-      try {
-        const fr = await runEngine(['frame', sh.file, String(i), path.join(state.workDir, `ref_${i}.jpg`)]);
-        const img = new Image();
-        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = fileUrl(fr.path); });
-        state.img = img;
-        sh.frame = i;
-      } catch (e) {
-        toast(e.message || `Impossible de lire l'image ${i}.`);
-      }
-    }
-    state.show = 'edit';
-    resetTimeline();
-    refresh();
-  }
-
-  async function track() {
-    if (!ready() || !inCEP) return;
-    stopPlay();
-    const sh = state.shot;
-    const pts = state.tool === 'rect' ? orderRect(state.points) : state.points;
-    const args = ['track', sh.file, '--surface', state.tool,
-      '--points', pts.map((p) => `${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(' '),
-      '--ref-frame', String(sh.frame), '--start', String(sh.rangeStart), '--end', String(sh.rangeEnd),
-      '--mode', 'object',  // la surface est animée, la caméra AE reste fixe : juste dans tous les cas
-      '--out-dir', path.join(state.workDir, `run${++state.runCount}`),
-      '--name', sh.footageName.replace(/\.[^.]+$/, '')];
-    if (state.tool === 'rect') args.push('--roundness', String(+$('in-round').value / 100));
-    const normal = chosenNormal();
-    if (normal) args.push('--normal', normal.map((x) => x.toFixed(6)).join(','));
-    const focal = parseFloat($('in-focal').value);
-    if (focal > 0) args.push('--focal-mm', String(focal));
-
-    $('log').textContent = '';
-    state.live = null;
-    state.show = 'live';
-    invalidateResult();
-    setBusy(true);
-    try {
-      const res = await runEngine(args, (ev) => {
-        if (ev.type === 'log') {
-          log(ev.msg);
-        } else if (ev.type === 'live') {
-          const img = new Image();
-          img.onload = () => {
-            state.live = { img, poly: ev.poly, frame: ev.frame };
-            $('live-badge').textContent = `Image ${ev.frame}`;
-            $('frame-label').textContent = String(ev.frame);
-            if (state.show === 'live') draw();
-          };
-          img.src = ev.img;
-        } else if (ev.type === 'progress') {
-          const f = ev.stage === 'track' ? 0.9 * ev.done / ev.total : 0.9 + 0.1 * ev.done / ev.total;
-          $('progress-bar').style.width = `${Math.round(100 * f)}%`;
-          if (ev.stage === 'preview') $('live-badge').textContent = 'Calcul de la 3D et de l\'aperçu…';
-        }
-      });
-      showResult(res);
-    } catch (e) {
-      state.show = 'edit';
-      if (e.message !== 'Annulé.') toast(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function setBusy(on) {
-    $('btn-track').classList.toggle('hidden', on);
-    $('btn-stop').classList.toggle('hidden', !on);
-    $('btn-stop').disabled = false;
-    $('btn-stop').textContent = '■ Arrêter';
-    $('progress').classList.toggle('hidden', !on);
-    $('scrub').classList.toggle('hidden', on);
-    $('progress-bar').style.width = '0%';
-    $('btn-load').disabled = on;
-    $('toolbar').classList.toggle('disabled', on);
-    $('orient-wrap').classList.toggle('disabled', on);
-    refresh();
-  }
-
-  $('btn-track').addEventListener('click', track);
-  $('btn-stop').addEventListener('click', () => {
-    if (!state.child) return;
-    state.child.stdin.write('stop\n');  // le moteur termine avec les images déjà trackées
-    $('btn-stop').disabled = true;
-    $('btn-stop').textContent = 'Arrêt…';
+    state.scrubbing = true;
+    showFrame(tlFrame(ev), { fast: true });
+    const move = (e) => showFrame(tlFrame(e), { fast: true });
+    const up = (e) => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      state.scrubbing = false;
+      goTo(tlFrame(e), true);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
   });
 
-  // ------------------------------------------------------------------ résultat
-  function showResult(res) {
-    state.result = res;
-    state.show = 'result';
-    const ul = $('summary');
-    ul.innerHTML = '';
-    const add = (cls, txt) => { const li = document.createElement('li'); li.className = cls; li.textContent = txt; ul.appendChild(li); };
-    const lost = res.lost.length;
-    add(lost ? 'warn' : 'ok', `${res.frames - lost}/${res.frames} images trackées` +
-      (lost ? (res.stopped ? ' (arrêté : le reste n\'a pas de clé)' : ` (suivi perdu sur ${lost}, sans clé)`) : ''));
-    if (!/métadonnées|saisie/.test(res.focal_source)) add('warn', `Focale : ${res.focal_source}`);
-    add(res.error_mean < 1.5 ? 'ok' : 'warn',
-      `Calage 3D sur la 2D : ${res.error_mean.toFixed(2)} px en moyenne (max ${res.error_max.toFixed(1)})`);
-    $('flip-wrap').classList.toggle('hidden', !res.alt_jsx);
-    $('chk-flip').checked = false;
-    $('result-actions').classList.remove('hidden');
-    $('apply-msg').classList.add('hidden');
-
-    const sc = $('scrub');
-    sc.min = String(res.start);
-    sc.max = String(res.end);
-    sc.value = String(state.shot.frame);
-    sc.disabled = false;
-    $('btn-play').disabled = false;
-    showFrame(+sc.value);
-    refresh();
-  }
-
-  function previewDir() {
-    const r = state.result;
-    return $('chk-flip').checked && r.alt_preview_dir ? r.alt_preview_dir : r.preview_dir;
-  }
-
-  function showFrame(i) {
-    if (!state.result) return;
-    $('frame-label').textContent = String(i);
-    const img = new Image();
-    img.onload = () => { state.previewImg = img; if (state.show === 'result') draw(); };
-    img.src = fileUrl(path.join(previewDir(), String(i).padStart(5, '0') + '.jpg'));
+  /** Aller à l'image k. commit : avant tout suivi, elle devient la référence. */
+  function goTo(k, commit) {
+    if (commit && !hasTrack() && k !== state.ref) act(() => { state.ref = k; state.Hs = {}; state.conf = {}; });
+    showFrame(k);
+    if (commit) syncAE(k);
   }
 
   let syncTimer = null;
-  function syncAE(i) { // l'instant d'AE suit l'aperçu (hors lecture)
-    if (state.playTimer || !state.shot) return;
+  function syncAE(k) { // l'instant d'AE suit le panneau (hors lecture)
+    if (!inCEP || state.playTimer || !state.shot) return;
     clearTimeout(syncTimer);
-    syncTimer = setTimeout(() => host('stGoToFrame', state.shot.compId, state.shot.timeOffset, state.shot.fps, i), 120);
+    syncTimer = setTimeout(() => host('stGoToFrame', state.shot.compId, state.shot.seqStart + k), 120);
   }
-
-  $('scrub').addEventListener('input', () => {
-    const i = +$('scrub').value;
-    if (state.result) {
-      if (state.show !== 'result') { state.show = 'result'; refresh(); }
-      showFrame(i);
-    } else {
-      if (state.show !== 'browse') { state.show = 'browse'; refresh(); }
-      browseTo(i);
-    }
-    syncAE(i);
-  });
-  $('scrub').addEventListener('change', () => {
-    if (!state.result && !state.playTimer) setReference(+$('scrub').value);
-  });
-  $('chk-flip').addEventListener('change', () => showFrame(+$('scrub').value));
 
   function stopPlay() {
-    if (state.playTimer) clearInterval(state.playTimer);
+    if (!state.playTimer) return;
+    clearInterval(state.playTimer);
     state.playTimer = null;
-    $('btn-play').textContent = '▶';
+    refresh();
   }
   $('btn-play').addEventListener('click', () => {
-    if (state.playTimer) {
-      stopPlay();
-      syncAE(+$('scrub').value);
-      if (!state.result) setReference(+$('scrub').value);  // avant tracking : la pause choisit la référence
-      return;
-    }
-    $('btn-play').textContent = '❚❚';
-    state.show = state.result ? 'result' : 'browse';
+    if (state.playTimer) { stopPlay(); goTo(state.k, true); return; }
+    const fps = Math.min(30, (state.shot && state.shot.compFps) || 25);
+    state.playTimer = setInterval(() => showFrame(state.k >= state.n - 1 ? 0 : state.k + 1, { fast: true }), 1000 / fps);
     refresh();
-    const fps = Math.min(25, state.shot.fps || 25);
-    state.playTimer = setInterval(() => {
-      const sc = $('scrub');
-      const i = +sc.value >= +sc.max ? +sc.min : +sc.value + 1;
-      sc.value = String(i);
-      if (state.result) showFrame(i); else browseTo(i);
-    }, 1000 / fps);
   });
 
-  $('btn-edit').addEventListener('click', () => { // revenir aux points sans les effacer
+  // ------------------------------------------------------------------ suivi
+  async function trackRun(btn) {
+    if (state.tracking) { state.eng.stop(); return; }  // le bouton en cours sert d'arrêt
+    const dir = +btn.dataset.dir, count = +btn.dataset.count, k = state.k;
+    const H = k === state.ref ? I3 : state.Hs[k];
+    if (!ready() || !state.eng || !H) return;
     stopPlay();
-    state.show = 'edit';
+    const pts = state.tool === 'rect' ? orderRect(state.points) : state.points;
+    beginAction();
+    state.Hs = Object.assign({}, state.Hs, { [state.ref]: I3 });  // nouvel objet : l'historique garde l'ancien
+    state.conf = Object.assign({}, state.conf, { [state.ref]: 1 });
+    state.tracking = { dir, count, btn };
     refresh();
+    try {
+      const r = await state.eng.send({
+        cmd: 'track', k, dir, count, ref: state.ref, H, Hprev: state.Hs[k - dir] || null,
+        tool: state.tool, points: pts, roundness: state.round / 100,
+      });
+      if (r.reason === 'lost') toast(`Suivi perdu à l'image ${state.shot.seqStart + r.last + dir} : corrigez la forme ou reprenez depuis une autre image.`, 5000);
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      state.tracking = null;
+      endAction();
+      showFrame(state.k);
+      syncAE(state.k);
+    }
+  }
+  document.querySelectorAll('.trk').forEach((b) => b.addEventListener('click', () => trackRun(b)));
+
+  // ------------------------------------------------------------------ 3D
+  let solveTimer = null;
+  function scheduleSolve() {
+    clearTimeout(solveTimer);
+    if (!hasTrack()) { state.pose = null; showSummary(); return; }
+    solveTimer = setTimeout(runSolve, 350);
+  }
+
+  async function runSolve() {
+    if (state.tracking || state.drag || !state.eng || !ready() || !hasTrack()) return;
+    if (state.solving) { scheduleSolve(); return; }
+    const rev = state.rev;
+    const pts = state.tool === 'rect' ? orderRect(state.points) : state.points;
+    const normal = chosenNormal();
+    const focal = parseFloat($('in-focal').value);
+    state.solving = true;
+    refresh();
+    try {
+      const r = await state.eng.send({
+        cmd: 'solve', Hs: state.Hs, conf: state.conf, ref: state.ref, tool: state.tool, points: pts,
+        roundness: state.round / 100, normal, focal_mm: focal > 0 ? focal : null,
+        out: inCEP ? path.join(state.workDir, `apply_${rev}.jsx`) : '',
+        name: state.shot.footageName.replace(/\.[^.]+$/, ''),
+      });
+      if (rev === state.rev) { state.pose = Object.assign(r, { rev }); showSummary(); }
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      state.solving = false;
+      if (rev !== state.rev) scheduleSolve();
+      refresh();
+    }
+  }
+
+  function showSummary() {
+    const ul = $('summary');
+    ul.innerHTML = '';
+    const r = state.pose;
+    if (!r) return;
+    const add = (cls, txt) => { const li = document.createElement('li'); li.className = cls; li.textContent = txt; ul.appendChild(li); };
+    const keys = Object.keys(state.Hs).map(Number).sort((a, b) => a - b);
+    const off = state.shot.seqStart;
+    add('ok', `${keys.length}/${state.n} images trackées (${off + keys[0]}–${off + keys[keys.length - 1]})`);
+    if (!/métadonnées|saisie/.test(r.focal_source)) add('warn', `Focale : ${r.focal_source}`);
+    if (r.error_mean !== null && r.error_mean !== undefined) {
+      add(r.error_mean < 1.5 ? 'ok' : 'warn', `Calage 3D sur la 2D : ${r.error_mean.toFixed(2)} px en moyenne (max ${r.error_max.toFixed(1)})`);
+    }
+  }
+
+  // ------------------------------------------------------------------ création dans AE
+  ['chk-null', 'chk-solid', 'chk-text'].forEach((id) => {
+    try { const v = localStorage.getItem('st.' + id); if (v !== null) $(id).checked = v === '1'; } catch (e) { /* stockage indisponible */ }
+    $(id).addEventListener('change', () => { try { localStorage.setItem('st.' + id, $(id).checked ? '1' : '0'); } catch (e) { /* idem */ } });
   });
 
   $('btn-apply').addEventListener('click', async () => {
-    const r = state.result;
-    if (!r) return;
-    const jsx = $('chk-flip').checked && r.alt_jsx ? r.alt_jsx : r.jsx;
+    const r = state.pose;
+    if (!r || !r.jsx || !inCEP) return;
+    const layers = { nul: $('chk-null').checked, solid: $('chk-solid').checked, text: $('chk-text').checked };
     $('btn-apply').disabled = true;
-    const out = await host('stApply', state.shot.compId, state.shot.layerIndex, jsx, state.shot.timeOffset);
-    $('btn-apply').disabled = false;
+    const out = await host('stApply', state.shot.compId, state.shot.layerIndex, r.jsx, layers);
+    refresh();
     const box = $('apply-msg');
     box.classList.remove('hidden');
     box.style.color = out.ok ? '' : 'var(--err)';
@@ -951,14 +1240,26 @@
 
   // ------------------------------------------------------------------ démarrage
   if (!inCEP) {
-    // aperçu dans un navigateur : éditeur seul, avec une image de démonstration si présente
-    $('shot-empty').textContent = 'Mode démo (hors After Effects) : éditeur seul.';
+    // aperçu dans un navigateur : moteur simulé, toutes les images = demo.jpg
+    $('shot-empty').textContent = 'Mode démo (hors After Effects) : suivi simulé.';
     $('btn-load').disabled = true;
-    enable('s-surface', true);
-    loadImage('demo.jpg').then(refresh).catch(() => refresh());
+    loadImg('demo.jpg').then((img) => {
+      state.W = img.width; state.H = img.height; state.n = 60;
+      state.shot = { seqStart: 0, compFps: 25, frames: Array.from({ length: 60 }, (_, i) => i), footageName: 'demo' };
+      state.k = state.ref = 20;
+      state.loadedUpto = 59;
+      state.eng = demoEngine(onEngineEvent);
+      state.full.set(20, img);
+      state.cur = img;
+      for (let i = 0; i < 60; i++) state.full.set(i, img);
+      enable('s-surface', true);
+      fitView();
+      refresh();
+    }).catch(() => refresh());
   } else {
     heartbeat();
     setInterval(heartbeat, 1000);
+    window.addEventListener('beforeunload', () => { if (state.eng) state.eng.close(); });
     refresh();
   }
 })();

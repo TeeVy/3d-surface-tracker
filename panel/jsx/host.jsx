@@ -66,22 +66,37 @@ function stGetLayer(compId, layerIndex, time) {
     return stDescribe(comp, comp.layer(layerIndex), time);
 }
 
+// Temps dans la source d'un calque à l'instant t de sa compo (remappage et étirement
+// compris), ou null s'il n'est pas visible à cet instant.
+function stLayerTime(L, t) {
+    if (t < L.inPoint - 1e-6 || t >= L.outPoint - 1e-6) return null;
+    if (L.timeRemapEnabled) return L.property("ADBE Time Remapping").valueAtTime(t, false);
+    return (t - L.startTime) * 100 / L.stretch;
+}
+
+// Image du fichier vidéo affichée à l'instant t de la compo du haut, en suivant la
+// chaîne de calques (précomps, remappages, étirements) ; -1 si rien n'est visible.
+function stSourceFrame(chain, t, fps, srcFrames) {
+    for (var i = 0; i < chain.length; i++) {
+        t = stLayerTime(chain[i], t);
+        if (t === null) return -1;
+        if (i < chain.length - 1 && (t < -1e-6 || t >= chain[i].source.duration - 1e-6)) return -1;
+    }
+    var f = Math.floor(t * fps + 1e-4);  // AE affiche l'image commencée au plus tard à cet instant
+    return (f < 0 || f >= srcFrames) ? -1 : f;
+}
+
 function stDescribe(comp, sel, time) {
     var L = sel;
-    var warnings = [], chain = [];
-    var offset = 0;                         // temps compo = offset + temps dans le fichier
+    var warnings = [], names = [], chain = [];
     var Ax = 1, Ay = 1, Bx = 0, By = 0;     // pixel compo = A * pixel du calque courant + B
-    var timeOk = true;
-    var lo = 0, hi = comp.duration;         // plage visible, dans le temps de la compo courante
+    var retimed = false;
 
     for (var depth = 0; depth < 12; depth++) {
         if (!(L instanceof AVLayer) || !L.source) return stFail("Le calque « " + L.name + " » n'est ni une vidéo ni un précomp.");
-        chain.push(L.name);
-        offset += L.startTime;
-        lo = Math.max(lo, L.inPoint) - L.startTime;   // -> temps de la source du calque
-        hi = Math.min(hi, L.outPoint) - L.startTime;
-        if (L.source instanceof CompItem) { lo = Math.max(lo, 0); hi = Math.min(hi, L.source.duration); }
-        if (L.timeRemapEnabled || !stNear(L.stretch, 100, 0.01)) timeOk = false;
+        chain.push(L);
+        names.push(L.name);
+        if (L.timeRemapEnabled || !stNear(L.stretch, 100, 0.01)) retimed = true;
         var tr = L.property("ADBE Transform Group");
         var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
         var sc = tr.property("ADBE Scale").value, rot = tr.property("ADBE Rotate Z").value;
@@ -101,9 +116,6 @@ function stDescribe(comp, sel, time) {
     var src = L.source;
     if (!stIsVideoFootage(src)) return stFail("Aucune vidéo trouvée sous le calque sélectionné (trop de niveaux de précomp ?).");
 
-    if (!timeOk) {
-        warnings.push("Remappage temporel ou étirement du temps dans la chaîne de précomps : les images clés seront décalées dans le temps.");
-    }
     var k = comp.width / src.width;
     if (!stNear(Ax, k, 0.002 * k) || !stNear(Ay, k, 0.002 * k) || !stNear(Bx, 0, 1) || !stNear(By, 0, 1)) {
         warnings.push("La vidéo est déplacée, recadrée ou mise à l'échelle entre le fichier et la compo : " +
@@ -112,27 +124,34 @@ function stDescribe(comp, sel, time) {
         warnings.push("La vidéo (" + src.width + "x" + src.height + ") est mise à l'échelle de la compo (" +
                       comp.width + "x" + comp.height + ") : le résultat aussi.");
     }
-    var fps = src.frameRate;
+
+    // Image du fichier montrée à chaque image de la compo où le calque est visible :
+    // le suivi porte exactement sur ce qu'affiche la compo, remappages compris.
+    var fps = src.frameRate, fd = comp.frameDuration;
     var srcFrames = Math.round(src.duration * fps);
-    // AE affiche l'image du rush qui commence au plus tard à l'instant demandé (arrondi par
-    // défaut) : on calcule de la même façon la plage et l'image courante, sinon une cadence de
-    // rush différente de celle de la compo (29,97 dans 25 i/s…) décale d'une image.
-    var first = Math.max(0, Math.floor(lo * fps + 1e-6));
-    var last = Math.min(srcFrames - 1, Math.ceil(hi * fps - 1e-6) - 1);
-    if (last < first) return stFail("Le calque n'est visible sur aucune image de la composition.");
-    var frame = Math.floor((time - offset) * fps + 1e-6);
-    if (frame < first || frame > last) {
-        warnings.push("L'instant courant (image " + frame + " du rush) est hors de la partie visible du calque (images " +
-                      first + " à " + last + ") : la référence part de l'image " + (frame < first ? first : last) +
-                      ". Choisissez-la dans la timeline du panneau.");
-        frame = Math.min(last, Math.max(first, frame));
+    var j0 = Math.max(0, Math.ceil(sel.inPoint / fd - 1e-4));
+    var j1 = Math.min(Math.round(comp.duration / fd), Math.ceil(sel.outPoint / fd - 1e-4)) - 1;
+    var frames = [];
+    for (var j = j0; j <= j1; j++) frames.push(stSourceFrame(chain, j * fd, fps, srcFrames));
+    var a = 0, b = frames.length - 1;
+    while (a <= b && frames[a] < 0) a++;
+    while (b >= a && frames[b] < 0) b--;
+    if (a > b) return stFail("Le calque n'est visible sur aucune image de la composition.");
+    frames = frames.slice(a, b + 1);
+    var seqStart = j0 + a;
+    for (var q = 1; q < frames.length; q++) if (frames[q] < 0) frames[q] = frames[q - 1];  // trou : image voisine
+
+    var cur = Math.floor(time / fd + 1e-4) - seqStart;
+    if (cur < 0 || cur >= frames.length) {
+        warnings.push("L'instant courant est hors de la partie visible du calque : la référence part de " +
+                      (cur < 0 ? "sa première" : "sa dernière") + " image. Choisissez-la dans la timeline du panneau.");
+        cur = Math.min(frames.length - 1, Math.max(0, cur));
     }
     return stJSON({
         ok: true, compId: comp.id, compName: comp.name, compW: comp.width, compH: comp.height,
-        layerIndex: sel.index, layerName: sel.name,
-        footageName: L.name, chain: chain, file: src.file.fsName, fps: fps, timeOffset: offset,
-        frame: frame, rangeStart: first, rangeEnd: last, srcFrames: srcFrames,
-        duration: src.duration, warnings: warnings
+        compFps: 1 / fd, layerIndex: sel.index, layerName: sel.name,
+        footageName: L.name, chain: names, file: src.file.fsName, fps: fps, srcFrames: srcFrames,
+        seqStart: seqStart, frames: frames, cur: cur, retimed: retimed, warnings: warnings
     });
 }
 
@@ -141,17 +160,17 @@ function stFindComp(compId) {
     return (c instanceof CompItem) ? c : null;
 }
 
-// Place l'instant courant de la compo sur une image de la vidéo (aperçu synchronisé).
-function stGoToFrame(compId, timeOffset, fps, frame) {
+// Place l'instant courant de la compo sur une de ses images (aperçu synchronisé).
+function stGoToFrame(compId, compFrame) {
     var comp = stFindComp(compId);
     if (!comp) return stFail("Composition introuvable.");
-    comp.time = timeOffset + frame / fps;
+    comp.time = compFrame * comp.frameDuration;
     return stJSON({ok: true});
 }
 
-// Exécute le script généré par le moteur dans la compo. timeOffset : temps compo
-// de la 1re image du fichier vidéo (précomps compris).
-function stApply(compId, layerIndex, jsxPath, timeOffset) {
+// Exécute le script généré par le moteur dans la compo. Les images clés sont datées
+// en images de cette compo ; layers : calques à créer {nul, solid, text}.
+function stApply(compId, layerIndex, jsxPath, layers) {
     var comp = stFindComp(compId);
     if (!comp) return stFail("Composition introuvable (supprimée ou renommée ?).");
     comp.openInViewer();
@@ -159,16 +178,19 @@ function stApply(compId, layerIndex, jsxPath, timeOffset) {
     if (layerIndex >= 1 && layerIndex <= comp.numLayers) comp.layer(layerIndex).selected = true;
     $.global.ST_PANEL = true;
     $.global.ST_RESULT = "";
-    $.global.ST_TIME_OFFSET = timeOffset;
+    $.global.ST_TIME_OFFSET = 0;
+    $.global.ST_LAYERS = layers;
     try {
         $.evalFile(File(jsxPath));
     } catch (e) {
         $.global.ST_PANEL = false;
         $.global.ST_TIME_OFFSET = null;
+        $.global.ST_LAYERS = null;
         return stFail("Erreur dans le script : " + e.toString() + " (ligne " + e.line + ")");
     }
     $.global.ST_PANEL = false;
     $.global.ST_TIME_OFFSET = null;
+    $.global.ST_LAYERS = null;
     var r = String($.global.ST_RESULT);
     if (r.indexOf("ERREUR ") === 0) return stFail(r.substring(7));
     return stJSON({ok: true, msg: r});

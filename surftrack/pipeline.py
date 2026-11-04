@@ -43,8 +43,6 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
     appelé après chaque image trackée (aperçu en direct). normal_hint : orientation
     choisie dans le panneau (normale du plan, repère caméra de référence) ; elle
     tranche l'ambiguïté d'un disque et s'impose pour une forme libre."""
-    if smooth is None:  # disque : calage sur le bord, on peut lisser davantage l'inclinaison
-        smooth = 4.0 if surface.kind == "disc" else 2.0
     W, H = video_size(video)
     if track_scale is None:  # 4K : on tracke en demi-résolution (2x plus rapide, 4x moins de mémoire)
         track_scale = 0.5 if max(W, H) > 2600 else 1.0
@@ -73,25 +71,6 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
     if tracker.stopped:
         log("Tracking arrêté à la demande : seules les images déjà trackées sont utilisées.")
 
-    conics = None
-    alternative = None
-    if surface.kind == "disc":  # suivi du bord, image par image
-        S = np.diag([track_scale, track_scale, 1.0])
-        Si = np.linalg.inv(S)
-        C0 = snap_ellipse(clip.frames[ref_frame], Si.T @ surface.conic @ Si)
-        et = EllipseTracker(clip.frames[ref_frame], C0)
-        conics = np.full((n, 3, 3), np.nan)
-        quality = np.zeros(n)
-        for i in range(n):
-            if i == ref_frame:
-                conics[i], quality[i] = C0, 1.0
-            elif np.all(np.isfinite(track_small.homographies[i])):
-                conics[i], quality[i] = et.refine(clip.frames[i], track_small.homographies[i])
-        conics = np.array([S.T @ C @ S for C in conics])  # retour en pleine résolution
-        track.confidence = np.minimum(track.confidence, quality)
-        done = np.isfinite(track_small.homographies).all(axis=(1, 2))
-        log(f"Bord du disque suivi sur {100 * (quality[done] > 0).mean():.0f} % des images trackées "
-            f"(qualité moyenne {quality[done].mean():.2f})")
     lost = _detect_loss(track, surface.track_polygon(), ref_frame)
     lost_untracked = ~np.isfinite(track.homographies).all(axis=(1, 2))
     if (lost & ~lost_untracked).any():
@@ -100,15 +79,46 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
             "aucune image clé n'y sera créée.")
     if lost.any():
         track.homographies[lost] = np.nan
-        if conics is not None:
-            conics[lost] = np.nan
     weak = np.flatnonzero((track.confidence < 0.6) & ~lost)
     log(f"Confiance moyenne {track.confidence.mean():.3f}, recalage sur la référence "
         f"{100 * track.anchored.mean():.0f} % des images"
         + (f" ; {len(weak)} image(s) douteuse(s), ex. {weak[:10].tolist()}" if len(weak) else ""))
 
-    # ---- focale : saisie > métadonnées caméra > estimation > défaut
-    sub = slice(None, None, max(1, n // 80))  # sous-échantillonnage pour l'estimation
+    focal, source = choose_focal(video, surface, track, W, H, focal_px, focal_mm, sensor_mm,
+                                 np.arange(start, start + n), log)
+    sol = solve(track, surface, W, H, focal, smooth=smooth, flip=flip, normal_hint=normal_hint,
+                aspect=aspect, frames_small=clip.frames, track_scale=track_scale, log=log)
+    pose = sol["pose"]
+
+    if mode == "auto":
+        mode, why = detect_motion_mode(clip.frames, track_scale, track.homographies, surface.track_polygon(),
+                                       pose, W, H)
+        log(f"Mouvement détecté : {'la caméra bouge' if mode == 'camera' else 'l’objet bouge'} ({why})")
+    else:
+        why = "choisi manuellement"
+    return Result(W, H, clip.fps, n, track, sol["ref_corners"], sol["corners"], pose, source, surface,
+                  sol["alternative"], sol["conics"], frame_offset=start, motion_mode=mode, motion_why=why,
+                  outline=sol["outline"], stopped=tracker.stopped)
+
+
+_LENS = {}
+
+
+def _lens(video):
+    """Métadonnées d'objectif (lues une fois par fichier : ffprobe est lent)."""
+    if video not in _LENS:
+        _LENS[video] = read_lens_info(video)
+    return _LENS[video]
+
+
+def choose_focal(video, surface, track, W, H, focal_px=None, focal_mm=None, sensor_mm=36.0,
+                 src_frames=None, log=print):
+    """Focale de chaque image : saisie > métadonnées caméra > estimation > 50 mm.
+    src_frames[i] : image du fichier montrée à l'image i de la séquence (zoom image par image)."""
+    n = len(track.homographies)
+    src = np.arange(n) if src_frames is None else np.asarray(src_frames, int)
+    ok = np.isfinite(track.homographies).all(axis=(1, 2))
+    sub = np.flatnonzero(ok)[::max(1, ok.sum() // 80)]  # sous-échantillonnage pour l'estimation
 
     def seqs_for(f):
         if surface.kind == "disc":
@@ -120,27 +130,61 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
     elif focal_mm:
         focal, source = focal_mm / sensor_mm * max(W, H), f"saisie ({focal_mm:g} mm)"
     else:
-        lens = read_lens_info(video)
+        lens = _lens(video)
         if lens:
-            focal = lens.focal_px_per_frame(W, H, start + n)[start:]
-            mm = lens.per_frame_mm[start:start + n]
-            if lens.varies:
+            focal = lens.focal_px_per_frame(W, H, int(src.max()) + 1)[src]
+            mm = (focal / max(W, H) * 36.0)[ok] if ok.any() else focal / max(W, H) * 36.0
+            if lens.varies and np.ptp(mm) > 0.05:
                 source = (f"métadonnées {lens.camera} / {lens.lens} : zoom de {mm.min():.1f} à "
                           f"{mm.max():.1f} mm éq. 35 mm, image par image")
             else:
                 source = f"métadonnées {lens.camera} / {lens.lens} : {lens.focal35_mm:.1f} mm éq. 35 mm"
-        else:
+        elif surface.kind != "free" and len(sub) >= 3:
             fe = estimate_focal(seqs_for, W, H)
             if fe.reliable:
                 focal, source = fe.focal, f"estimée (±{100 * fe.rel_uncertainty:.0f} %)"
             else:
                 focal = 50 / 36 * max(W, H)
-                source = "défaut 50 mm (pas assez de perspective pour l'estimer : utilisez --focal-mm)"
+                source = "défaut 50 mm (pas assez de perspective pour l'estimer)"
+        else:
+            focal = 50 / 36 * max(W, H)
+            source = "défaut 50 mm"
     focal = as_focals(focal, n)
     log(f"Focale : {np.median(focal):.0f} px — {source}" if np.ptp(focal) < 1 else
         f"Focale : {focal.min():.0f} à {focal.max():.0f} px — {source}")
+    return focal, source
 
-    if surface.kind == "disc":
+
+def solve(track, surface, W, H, focal, smooth=None, flip=False, normal_hint=None, aspect=None,
+          frames_small=None, track_scale=1.0, log=print):
+    """Pose 3D de la surface dans chaque image trackée (homographie finie).
+    track : TrackResult pleine résolution ; frames_small : images (niveaux de gris, à
+    l'échelle track_scale) nécessaires au suivi du bord d'un disque.
+    Renvoie un dict : pose, corners, ref_corners, conics, outline, alternative."""
+    if smooth is None:  # disque : calage sur le bord, on peut lisser davantage l'inclinaison
+        smooth = 4.0 if surface.kind == "disc" else 2.0
+    n = len(track.homographies)
+    ref_frame = track.ref_index
+    focal = as_focals(focal, n)
+    tracked = np.isfinite(track.homographies).all(axis=(1, 2))
+    conics = alternative = outline = None
+    if surface.kind == "disc":  # suivi du bord, image par image
+        S = np.diag([track_scale, track_scale, 1.0])
+        Si = np.linalg.inv(S)
+        C0 = snap_ellipse(frames_small[ref_frame], Si.T @ surface.conic @ Si)
+        et = EllipseTracker(frames_small[ref_frame], C0)
+        conics = np.full((n, 3, 3), np.nan)
+        quality = np.zeros(n)
+        for i in np.flatnonzero(tracked):
+            if i == ref_frame:
+                conics[i], quality[i] = C0, 1.0
+            else:
+                conics[i], quality[i] = et.refine(frames_small[i], S @ track.homographies[i] @ Si)
+        conics = np.array([S.T @ C @ S for C in conics])  # retour en pleine résolution
+        track.confidence = np.minimum(track.confidence, quality)
+        log(f"Bord du disque suivi sur {100 * (quality[tracked] > 0).mean():.0f} % des images trackées "
+            f"(qualité moyenne {quality[tracked].mean():.2f})")
+
         # 2 inclinaisons possibles. Le centre réel du disque n'est pas au centre de
         # l'ellipse, et ce décalage diffère entre les deux : on garde celle dont le
         # centre suit le mieux le mouvement tracké.
@@ -151,7 +195,7 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
             moved = np.array([warp_points(Hh, ctr[ref_frame][None])[0] for Hh in track.homographies])
             ok = p.valid & np.isfinite(moved).all(axis=1)
             sols.append((p, c))
-            costs.append(float(np.median(np.linalg.norm(ctr[ok] - moved[ok], axis=1))))
+            costs.append(float(np.median(np.linalg.norm(ctr[ok] - moved[ok], axis=1))) if ok.any() else 0.0)
         ambiguous = max(costs) < 1.5 * min(costs) + 1.0  # trop proches pour trancher (faible perspective)
         if normal_hint is not None:  # choix fait dans le panneau : la plus proche de l'orientation montrée
             hint = np.asarray(normal_hint, float) / np.linalg.norm(normal_hint)
@@ -188,15 +232,13 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
                 "l'image de référence. Un rectangle ou un disque donne une orientation plus sûre.")
         ref_corners, aspect, outline = surface.reference_rect(normal, focal[ref_frame], W, H)
         corners = track.warp(ref_corners)
-        tracked = np.isfinite(corners).all(axis=(1, 2))
         pose = solve_poses(corners, focal, W, H, aspect, ref_frame, tracked)
     else:
         ref_corners = surface.corners
         corners = track.warp(ref_corners)
         if aspect is None:
-            aspect = estimate_aspect(corners, focal, W, H, track.confidence >= 0.6)
+            aspect = estimate_aspect(corners, focal, W, H, tracked & (track.confidence >= 0.6))
         log(f"Proportions de la surface : {aspect:.3f}")
-        tracked = np.isfinite(corners).all(axis=(1, 2))
         pose = solve_poses(corners, focal, W, H, aspect, ref_frame, tracked)
     pose = stabilize_poses(pose, corners, W, H, smooth, conics)
     if surface.kind == "disc":  # coins virtuels du carré : ceux de la pose finale
@@ -204,18 +246,12 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
     if alternative is not None:
         alt_pose = stabilize_poses(alternative[0], alternative[1], W, H, smooth, conics)
         alternative = (alt_pose, project_corners(alt_pose, W, H))
-    log(f"Écart 3D / tracking 2D ({'bord du disque' if surface.kind == 'disc' else 'coins'}) : moyenne {np.nanmean(pose.reproj_error):.2f} px, "
-        f"max {np.nanmax(pose.reproj_error):.2f} px")
-
-    if mode == "auto":
-        mode, why = detect_motion_mode(clip.frames, track_scale, track.homographies, surface.track_polygon(),
-                                       pose, W, H)
-        log(f"Mouvement détecté : {'la caméra bouge' if mode == 'camera' else 'l’objet bouge'} ({why})")
-    else:
-        why = "choisi manuellement"
-    return Result(W, H, clip.fps, n, track, ref_corners, corners, pose, source, surface, alternative, conics,
-                  frame_offset=start, motion_mode=mode, motion_why=why,
-                  outline=outline if surface.kind == "free" else None, stopped=tracker.stopped)
+    if pose.valid.any():
+        log(f"Écart 3D / tracking 2D ({'bord du disque' if surface.kind == 'disc' else 'coins'}) : "
+            f"moyenne {np.nanmean(pose.reproj_error[pose.valid]):.2f} px, "
+            f"max {np.nanmax(pose.reproj_error[pose.valid]):.2f} px")
+    return dict(pose=pose, corners=corners, ref_corners=ref_corners, conics=conics, outline=outline,
+                alternative=alternative)
 
 
 def _detect_loss(track, poly, ref_frame, min_conf=0.3, max_area_ratio=1.5):

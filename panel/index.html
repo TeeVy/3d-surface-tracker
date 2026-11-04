@@ -18,11 +18,11 @@
   </header>
   <ul id="shot-warnings" class="warnings"></ul>
 
-  <!-- Surface -->
+  <!-- Surface + suivi -->
   <section id="s-surface" class="disabled">
     <div class="toolbar" id="toolbar">
       <div class="seg">
-        <button data-tool="rect" class="tool icon on" title="Rectangle : 4 coins (arrondissez pour un disque)">
+        <button data-tool="rect" class="tool icon on" title="Rectangle : 4 coins (arrondissez à fond pour un disque)">
           <svg viewBox="0 0 24 24"><path d="M4 7l15-2 1 12-16 2z"/></svg>
         </button>
         <button data-tool="free" class="tool icon" title="Forme libre : contour d'une zone plane, point par point">
@@ -34,19 +34,53 @@
         <input id="in-round" type="range" min="0" max="100" step="1" value="0">
         <span id="round-val" class="mono">0 %</span>
       </label>
-      <button id="btn-flip" class="tool icon hidden" title="Inverser l'inclinaison du disque (flèche bleue)">
+      <button id="btn-flip" class="tool icon hidden" title="Inverser l'inclinaison du disque">
         <svg viewBox="0 0 24 24"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg>
       </button>
       <span class="grow"></span>
-      <button id="btn-clear" class="tool icon" title="Effacer les points">
+      <button id="btn-undo" class="tool icon" title="Annuler (⌘Z)" disabled>
+        <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3"/></svg>
+      </button>
+      <button id="btn-redo" class="tool icon" title="Rétablir (⇧⌘Z)" disabled>
+        <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H9a5 5 0 0 0 0 10h3"/></svg>
+      </button>
+      <button id="btn-clear-track" class="tool icon hidden" title="Effacer le suivi (garde la forme)">
+        <svg viewBox="0 0 24 24"><path d="M3 12h18M7 8v8M12 8v8M17 8v8M4 4l16 16"/></svg>
+      </button>
+      <button id="btn-clear" class="tool icon" title="Tout effacer (forme et suivi)">
         <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/></svg>
       </button>
     </div>
+
     <div id="canvas-wrap">
       <canvas id="view"></canvas>
-      <div id="live-badge" class="live-badge hidden"></div>
+      <div id="badge" class="badge hidden"></div>
       <div id="canvas-empty">L'image du calque s'affichera ici.</div>
     </div>
+
+    <div class="transport">
+      <div class="seg">
+        <button id="btn-back-all" class="tool icon trk" data-dir="-1" data-count="0" title="Tracker en arrière jusqu'au début">
+          <svg class="solid" viewBox="0 0 24 24"><path d="M11.5 6v12L3 12zM21 6v12l-8.5-6z"/></svg>
+        </button>
+        <button id="btn-back-1" class="tool icon trk" data-dir="-1" data-count="1" title="Tracker une image en arrière">
+          <svg class="solid" viewBox="0 0 24 24"><path d="M5 6h2.5v12H5zM19 6v12l-10-6z"/></svg>
+        </button>
+        <button id="btn-fwd-1" class="tool icon trk" data-dir="1" data-count="1" title="Tracker une image en avant">
+          <svg class="solid" viewBox="0 0 24 24"><path d="M5 6v12l10-6zM16.5 6H19v12h-2.5z"/></svg>
+        </button>
+        <button id="btn-fwd-all" class="tool icon trk" data-dir="1" data-count="0" title="Tracker en avant jusqu'à la fin">
+          <svg class="solid" viewBox="0 0 24 24"><path d="M3 6v12l8.5-6zM12.5 6v12l8.5-6z"/></svg>
+        </button>
+      </div>
+      <button id="btn-play" class="tool icon" title="Lecture / pause (vignettes)">
+        <svg class="solid" viewBox="0 0 24 24"><path id="play-path" d="M7 5l12 7-12 7z"/></svg>
+      </button>
+      <span class="grow"></span>
+      <span id="frame-label" class="frame-label mono">—</span>
+    </div>
+    <canvas id="timeline"></canvas>
+
     <div id="hint" class="hint"></div>
     <!-- Forme libre : orientation réglée au gizmo -->
     <div id="orient-wrap" class="orient hidden">
@@ -61,24 +95,15 @@
     </div>
   </section>
 
-  <!-- Tracking + résultat -->
-  <section id="s-track" class="disabled">
-    <div class="row track-row">
-      <button id="btn-track" class="primary">Tracker</button>
-      <button id="btn-stop" class="hidden" title="Arrête le suivi et garde les images déjà trackées">■ Arrêter</button>
-      <button id="btn-play" class="tool icon" title="Lecture / pause de l'aperçu" disabled>▶</button>
-      <div class="scrub-wrap grow">
-        <input id="scrub" type="range" min="0" max="0" value="0" disabled>
-        <div id="progress" class="hidden"><div id="progress-bar"></div></div>
-      </div>
-      <span id="frame-label" class="mono">—</span>
-    </div>
+  <!-- Résultat + création des calques -->
+  <section id="s-result" class="disabled">
     <ul id="summary" class="summary"></ul>
-    <div id="result-actions" class="row hidden">
-      <button id="btn-edit" class="small" title="Revenir aux points de la surface">Retoucher</button>
-      <label class="check hidden" id="flip-wrap"><input id="chk-flip" type="checkbox"> Inclinaison inversée</label>
+    <div class="row export">
+      <label class="chip" title="Null 3D au centre de la surface : parentez-y votre contenu"><input type="checkbox" id="chk-null" checked><span>Null</span></label>
+      <label class="chip" title="Solide de la taille de la surface"><input type="checkbox" id="chk-solid" checked><span>Solide</span></label>
+      <label class="chip" title="Calque texte posé sur la surface"><input type="checkbox" id="chk-text"><span>Texte</span></label>
       <span class="grow"></span>
-      <button id="btn-apply" class="primary">Appliquer dans AE</button>
+      <button id="btn-apply" class="primary" disabled>Créer dans AE</button>
     </div>
     <div id="apply-msg" class="info hidden"></div>
     <details id="log-box"><summary>Journal</summary><pre id="log"></pre></details>

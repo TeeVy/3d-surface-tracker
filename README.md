@@ -35,29 +35,45 @@ s'ouvre avec ce calque chargé. Seule la partie du rush visible dans la compo se
 > autoriser les scripts à écrire des fichiers : *Préférences > Scripts et expressions*.
 > Le bouton ↻ du panneau charge aussi le calque sélectionné.
 
-1. **Image de référence** : la timeline parcourt le plan dès le chargement (vignettes générées en
-   quelques secondes). Relâchez le curseur, ou mettez la lecture en pause, sur une image nette où la
-   surface est bien visible : elle devient la référence. Le suivi partira de là, vers l'avant puis
-   vers l'arrière.
+Le panneau suit **exactement les images que montre la compo** : précomps, remappage temporel et
+étirement compris (une image figée ou un ralenti sont suivis tels quels). Les images clés sont
+posées sur les images de la compo.
+
+1. **Image de référence** : à l'ouverture, une seule lecture du plan charge les images en mémoire et
+   prépare les vignettes de la timeline (bande grise). Cliquez ou glissez dans la timeline, ou
+   utilisez ← → (Maj : 10 images), jusqu'à une image nette où la surface est bien visible. Avant tout
+   suivi, l'image où vous relâchez devient la référence (repère jaune).
 2. **Surface** :
    - **Rectangle** : cliquez les 4 coins. Le curseur d'arrondi suit les coins arrondis ; à fond, la
      forme devient un **disque**, et ⇅ inverse son inclinaison.
    - **Forme libre** : cliquez le contour d'une zone plane. Son orientation est déduite du mouvement,
-     ou réglée au gizmo en alignant la grille sur la scène (*Auto* pour revenir au mouvement).
-   - Le **gizmo 3D** (grille et axes, comme dans l'aperçu final) montre l'orientation dès la création.
-     Glissez sa poignée blanche pour tourner la surface (Maj : rotation dans son plan). Pour un
-     rectangle ou un disque, les coins suivent.
-   - Pour ajuster la vue : molette pour zoomer, Espace ou clic droit pour la déplacer, double-clic pour
-     la recadrer. Glissez un point pour le corriger (une loupe s'affiche), clic droit pour le supprimer.
+     ou réglée aux anneaux en alignant la grille sur la scène (*Auto* pour revenir au mouvement).
+   - **Orientation** : la grille et les axes 3D (X rouge, Y vert, Z bleu) s'affichent dès que la forme
+     est fermée. Glissez un **anneau** pour tourner la surface autour de cet axe, comme dans AE. Pour
+     un rectangle ou un disque, les coins suivent.
+   - Vue : molette pour zoomer, Espace ou clic droit pour la déplacer, double-clic pour la recadrer.
+     Glissez un point pour le corriger (une loupe s'affiche), clic droit pour le supprimer.
    - Si la vidéo n'a pas de métadonnées de focale, un champ apparaît pour la saisir.
-3. **Tracker** : le suivi s'affiche en direct. *■ Arrêter* stoppe dès que ça décroche, en gardant les
-   images déjà trackées. Sur une surface brillante (reflets), prenez ses bords et ses coins dans la
-   zone suivie : les reflets glissent quand la caméra bouge, pas les arêtes.
-4. **Résultat** : parcourez l'aperçu sur la même ligne (l'instant d'AE suit), puis cliquez
-   *Appliquer dans AE*. La surface est animée et la caméra AE reste fixe, ce qui est juste pour tout
-   contenu posé sur la surface, que l'objet ou la caméra bouge.
+3. **Tracker** avec les quatre boutons sous l'image : en arrière jusqu'au début, une image en
+   arrière, une image en avant, en avant jusqu'à la fin. Le suivi part de l'image affichée (la
+   référence ou une image déjà trackée) et s'affiche en direct ; le bouton en cours devient ■ pour
+   l'arrêter. Il s'arrête aussi tout seul s'il décroche. La timeline montre les images trackées
+   (vert, orange si douteux).
+   - Sur une image trackée, glissez un point pour corriger la forme : la correction vaut pour tout
+     le plan, la 3D est recalculée aussitôt, sans retracker.
+   - Sur une surface brillante (reflets), prenez ses bords et ses coins dans la zone suivie : les
+     reflets glissent quand la caméra bouge, pas les arêtes.
+4. **Résultat** : la grille cyan montre la surface 3D calculée, image par image. Cochez les calques à
+   créer (**Null**, **Solide**, **Texte**) puis *Créer dans AE*. Ils sont posés sur la surface et
+   animés ; la caméra AE (créée une fois, puis réutilisée) reste fixe. Pour poser votre contenu,
+   parentez-le au null et mettez sa position à 0,0,0.
 
-Les fichiers de chaque session sont dans `out/panel/`.
+**Annuler** : ⌘Z annule n'importe quelle action (points, arrondi, rotation, référence, suivi…),
+⇧⌘Z la rétablit. Les boutons ↶ ↷ font de même. L'icône barrée efface le suivi en gardant la forme,
+la corbeille efface tout.
+
+Les fichiers de chaque session sont dans `out/panel/`, les vignettes (gardées d'une fois sur
+l'autre pour un même fichier) dans `out/panel/cache/`.
 
 ## Utilisation en ligne de commande
 

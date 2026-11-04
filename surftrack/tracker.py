@@ -90,13 +90,8 @@ class PlanarTracker:
     def track(self, frames, ref_index, polygon, progress=None, should_stop=None):
         """progress(fait, total, i, H) après chaque image ; should_stop() -> True pour
         arrêter : les images non encore trackées restent vides (NaN)."""
-        poly = np.asarray(polygon, dtype=np.float64).reshape(-1, 2)
+        poly = self.prepare(frames[ref_index], polygon)
         n = len(frames)
-        self.ref_tpl = _Template(frames[ref_index], poly)
-        if not self.ref_tpl.ok:
-            raise ValueError("La zone à tracker est trop petite ou hors de l'image.")
-        size = float(np.linalg.norm(poly.max(axis=0) - poly.min(axis=0)))
-        self.max_anchor_jump = max(3.0, 0.02 * size)
 
         Hs = np.full((n, 3, 3), np.nan)
         conf = np.zeros(n)
@@ -123,6 +118,21 @@ class PlanarTracker:
             if self.stopped:
                 break
         return TrackResult(Hs, conf, anchored, ref_index)
+
+    def prepare(self, ref_img, polygon):
+        """Modèle de la référence (anti-dérive). Renvoie le polygone en (k,2) float."""
+        poly = np.asarray(polygon, dtype=np.float64).reshape(-1, 2)
+        self.ref_tpl = _Template(ref_img, poly)
+        if not self.ref_tpl.ok:
+            raise ValueError("La zone à tracker est trop petite ou hors de l'image.")
+        size = float(np.linalg.norm(poly.max(axis=0) - poly.min(axis=0)))
+        self.max_anchor_jump = max(3.0, 0.02 * size)
+        return poly
+
+    def step(self, prev, cur, H_prev, dH_prev, poly):
+        """Une image : (H référence -> cur, confiance, recalée sur la référence)."""
+        self._cache = {}
+        return self._step(prev, cur, H_prev, dH_prev, poly)
 
     # ----------------------------------------------------------------- interne
     def _scaled(self, img, s):

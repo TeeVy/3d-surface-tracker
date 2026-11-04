@@ -100,10 +100,19 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
         else prop.setValuesAtTimes(times(), values);
     }
 
+    // calques à créer (choix du panneau) ; par défaut : null + solide
+    var LY = $.global.ST_LAYERS || {nul: true, solid: true, text: false};
+    var w = Math.max(4, Math.round(D.size[0] * k)), h = Math.max(4, Math.round(D.size[1] * k));
+
     app.beginUndoGroup("3D Surface Track");
 
-    // --- Caméra (une seule cible, pas d'orientation automatique)
-    var cam = comp.layers.addCamera(NAME + " Caméra", [comp.width / 2, comp.height / 2]);
+    // --- Caméra (une seule cible, pas d'orientation automatique) ; réutilisée si déjà là
+    var cam = null;
+    for (var ci = 1; ci <= comp.numLayers; ci++) {
+        if (comp.layer(ci) instanceof CameraLayer && comp.layer(ci).name === NAME + " Caméra") cam = comp.layer(ci);
+    }
+    var camNew = !cam;
+    if (camNew) cam = comp.layers.addCamera(NAME + " Caméra", [comp.width / 2, comp.height / 2]);
     cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
     var zooms = [];
     for (var z = 0; z < D.zoom.length; z++) zooms.push(D.zoom[z] * k);
@@ -112,73 +121,99 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
     animate(camT.property("ADBE Position"), scaleAll(D.camPos));
     animate(camT.property("ADBE Orientation"), D.camOri);
 
-    // --- Null 3D qui porte la pose de la surface
-    var nul = comp.layers.addNull();
-    nul.name = NAME + " Surface (pose)";
-    nul.threeDLayer = true;
-    var nulT = nul.property("ADBE Transform Group");
-    animate(nulT.property("ADBE Position"), scaleAll(D.srfPos));
-    animate(nulT.property("ADBE Orientation"), D.srfOri);
-
-    // --- Solide de démonstration collé à la surface (à remplacer par votre contenu)
-    var w = Math.max(4, Math.round(D.size[0] * k)), h = Math.max(4, Math.round(D.size[1] * k));
-    var sol = comp.layers.addSolid([0.15, 0.55, 1.0], NAME + " Contenu (remplacez-moi)", w, h, comp.pixelAspect);
-    sol.threeDLayer = true;
-    sol.setParentWithJump(nul);  // « parent = » compenserait la transformation : on veut l'identité
-    var solT = sol.property("ADBE Transform Group");
-    solT.property("ADBE Position").setValue(nulT.property("ADBE Anchor Point").value);
-    solT.property("ADBE Orientation").setValue([0, 0, 0]);
-    solT.property("ADBE Rotate X").setValue(0);
-    solT.property("ADBE Rotate Y").setValue(0);
-    solT.property("ADBE Rotate Z").setValue(0);
-    solT.property("ADBE Scale").setValue([100 * D.size[0] * k / w, 100 * D.size[1] * k / h, 100]);
-    solT.property("ADBE Opacity").setValue(60);
-    if (D.shape === "disc") {  // masque circulaire inscrit dans le carré
-        var mk = sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
-        var e = 0.5523, sh = new Shape();
-        sh.vertices = [[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]];
-        sh.inTangents = [[-e * w / 2, 0], [0, -e * h / 2], [e * w / 2, 0], [0, e * h / 2]];
-        sh.outTangents = [[e * w / 2, 0], [0, e * h / 2], [-e * w / 2, 0], [0, -e * h / 2]];
-        sh.closed = true;
-        mk.property("ADBE Mask Shape").setValue(sh);
+    // Pose de la surface appliquée directement au calque : son point d'ancrage = centre de la surface.
+    function pose(L) {
+        L.threeDLayer = true;
+        var T = L.property("ADBE Transform Group");
+        animate(T.property("ADBE Position"), scaleAll(D.srfPos));
+        animate(T.property("ADBE Orientation"), D.srfOri);
+        return L;
     }
-    if (D.shape === "free" && D.outline) {  // masque reprenant la forme libre
-        var mf = sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
-        var sf = new Shape(), vs = [];
-        for (var q = 0; q < D.outline.length; q++) vs.push([D.outline[q][0] * w, D.outline[q][1] * h]);
-        sf.vertices = vs;
-        sf.closed = true;
-        mf.property("ADBE Mask Shape").setValue(sf);
+    function poseNull(name) {
+        var n = comp.layers.addNull();
+        n.name = name;
+        n.property("ADBE Transform Group").property("ADBE Anchor Point").setValue([0, 0, 0]);
+        return pose(n);
     }
-    sol.moveBefore(nul);
+    var made = [];
 
-    // --- Autocontrôle : reprojection des coins du solide vs coins trackés
+    // --- Texte posé sur la surface
+    if (LY.text) {
+        var txt = comp.layers.addText("Texte");
+        txt.name = NAME + " Texte";
+        var tp = txt.property("ADBE Text Properties").property("ADBE Text Document");
+        var td = tp.value;
+        td.fontSize = Math.max(6, Math.round(0.22 * Math.min(w, h)));
+        td.fillColor = [1, 1, 1];
+        td.justification = ParagraphJustification.CENTER_JUSTIFY;
+        tp.setValue(td);
+        var r = txt.sourceRectAtTime(comp.time, false);
+        txt.property("ADBE Transform Group").property("ADBE Anchor Point")
+           .setValue([r.left + r.width / 2, r.top + r.height / 2, 0]);
+        pose(txt);
+        made.push("texte");
+    }
+
+    // --- Solide collé à la surface (à remplacer par votre contenu)
+    if (LY.solid) {
+        var sol = comp.layers.addSolid([0.15, 0.55, 1.0], NAME + " Contenu (remplacez-moi)", w, h, comp.pixelAspect);
+        pose(sol);
+        sol.property("ADBE Transform Group").property("ADBE Scale").setValue([100 * D.size[0] * k / w, 100 * D.size[1] * k / h, 100]);
+        sol.property("ADBE Transform Group").property("ADBE Opacity").setValue(60);
+        if (D.shape === "disc") {  // masque circulaire inscrit dans le carré
+            var mk = sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
+            var e = 0.5523, sh = new Shape();
+            sh.vertices = [[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]];
+            sh.inTangents = [[-e * w / 2, 0], [0, -e * h / 2], [e * w / 2, 0], [0, e * h / 2]];
+            sh.outTangents = [[e * w / 2, 0], [0, e * h / 2], [-e * w / 2, 0], [0, -e * h / 2]];
+            sh.closed = true;
+            mk.property("ADBE Mask Shape").setValue(sh);
+        }
+        if (D.shape === "free" && D.outline) {  // masque reprenant la forme libre
+            var mf = sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
+            var sf = new Shape(), vs = [];
+            for (var q = 0; q < D.outline.length; q++) vs.push([D.outline[q][0] * w, D.outline[q][1] * h]);
+            sf.vertices = vs;
+            sf.closed = true;
+            mf.property("ADBE Mask Shape").setValue(sf);
+        }
+        made.push("solide");
+    }
+
+    // --- Null 3D au centre de la surface : parentez-y votre contenu (position 0,0,0)
+    var nul = poseNull(NAME + " Surface");
+    if (LY.nul) made.push("null");
+
+    // --- Autocontrôle : reprojection des coins de la surface vs coins trackés
     var probe = comp.layers.addNull();
     probe.threeDLayer = true;
     var pp = probe.property("ADBE Transform Group").property("ADBE Position");
-    var corners = [[0, 0], [w, 0], [w, h], [0, h]];
+    var sw = D.size[0] * k, shh = D.size[1] * k;
+    var corners = [[-sw / 2, -shh / 2], [sw / 2, -shh / 2], [sw / 2, shh / 2], [-sw / 2, shh / 2]];
     var errSum = 0, errMax = 0, nErr = 0;
     for (var c = 0; c < 4; c++) {
-        pp.expression = "thisComp.layer(" + sol.index + ").toComp([" + corners[c][0] + "," + corners[c][1] + ",0])";
+        pp.expression = "thisComp.layer(" + nul.index + ").toComp([" + corners[c][0] + "," + corners[c][1] + ",0])";
         for (var j = 0; j < D.check.length; j++) {
             var v = pp.valueAtTime(startTime + D.check[j].f / D.fps, false);
             var dx = v[0] - D.check[j].c[c][0] * k, dy = v[1] - D.check[j].c[c][1] * k;
-            var e = Math.sqrt(dx * dx + dy * dy);
-            errSum += e; nErr++;
-            if (e > errMax) errMax = e;
+            var e2 = Math.sqrt(dx * dx + dy * dy);
+            errSum += e2; nErr++;
+            if (e2 > errMax) errMax = e2;
         }
     }
     probe.remove();
+    if (!LY.nul) nul.remove();
 
     app.endUndoGroup();
 
     var msg = "3D Surface Tracker — " + (D.mode === "object" ? "mode OBJET (caméra fixe)" : "mode CAMÉRA (surface fixe)") +
-              "\n\n" + D.frames.length + " images clés créées." +
+              "\n\n" + D.frames.length + " images clés · calques créés : " + (made.length ? made.join(", ") : "aucun") +
+              (camNew ? " + caméra" : " (caméra existante mise à jour)") +
               "\nZoom caméra : " + (D.zoom.length === 1 ? (D.zoom[0] * k).toFixed(0) + " px"
                                     : "animé (" + D.zoom.length + " clés, zoom de l'objectif)") +
               "\nContrôle de reprojection : moyenne " + (errSum / nErr).toFixed(2) + " px, max " + errMax.toFixed(2) + " px";
     if (errMax > 3) msg += "\n\n⚠ Écart élevé : vérifiez que le calque vidéo sélectionné est bien celui tracké.";
-    msg += "\n\nPlacez votre contenu comme enfant de « " + nul.name + " » (ou remplacez le solide).";
+    if (LY.nul) msg += "\n\nPour poser votre contenu : parentez-le à « " + nul.name + " » et mettez sa position à 0,0,0.";
     if ($.global.ST_TEST_MODE) { $.global.ST_TEST_RESULT = {mean: errSum / nErr, max: errMax}; return; }
     if ($.global.ST_PANEL) { $.global.ST_RESULT = msg; return; }
     alert(msg);
