@@ -33,7 +33,7 @@ from surftrack.metadata import read_lens_info
 from surftrack.pipeline import run
 from surftrack.preview import write_preview_jpgs
 from surftrack.surface import DiscSurface, FreeSurface, RectSurface
-from surftrack.video import read_frame_bgr
+from surftrack.video import iter_bgr, read_frame_bgr
 
 
 def emit(**kw):
@@ -60,6 +60,22 @@ def cmd_frame(a):
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(a.out, img, [cv2.IMWRITE_JPEG_QUALITY, 92])
     emit(type="result", path=a.out, width=img.shape[1], height=img.shape[0])
+
+
+def cmd_thumbs(a):
+    """Vignettes de la plage, pour parcourir le plan avant le tracking."""
+    out = Path(a.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    total = a.end - a.start + 1
+    last = 0.0
+    for k, img in enumerate(iter_bgr(a.video, a.start, a.end)):
+        s = min(1.0, a.max_side / max(img.shape[:2]))
+        small = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(out / f"{a.start + k:05d}.jpg"), small, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if time.time() - last > 0.25 or k == total - 1:
+            last = time.time()
+            emit(type="progress", stage="thumbs", done=k + 1, total=total)
+    emit(type="result", dir=str(out), start=a.start, end=a.end)
 
 
 def cmd_track(a):
@@ -146,6 +162,12 @@ def main():
     p.add_argument("video")
     p.add_argument("index", type=int)
     p.add_argument("out")
+    p = sub.add_parser("thumbs")
+    p.add_argument("video")
+    p.add_argument("start", type=int)
+    p.add_argument("end", type=int)
+    p.add_argument("out_dir")
+    p.add_argument("--max-side", type=int, default=720)
     p = sub.add_parser("track")
     p.add_argument("video")
     p.add_argument("--surface", choices=["rect", "disc", "free"], required=True)
@@ -162,7 +184,7 @@ def main():
     p.add_argument("--name")
     a = ap.parse_args()
     try:
-        {"info": cmd_info, "frame": cmd_frame, "track": cmd_track}[a.cmd](a)
+        {"info": cmd_info, "frame": cmd_frame, "thumbs": cmd_thumbs, "track": cmd_track}[a.cmd](a)
     except Exception as e:  # le panneau affiche le message
         emit(type="error", msg=str(e), trace=traceback.format_exc())
         sys.exit(1)

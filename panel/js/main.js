@@ -37,12 +37,15 @@
     tool: 'rect',        // 'rect' | 'free'
     points: [],          // en pixels de la vidéo
     flip: false,         // disque : autre inclinaison
-    orientManual: false, // forme libre : orientation réglée à la main
+    orientManual: false, // forme libre : orientation réglée à la main (gizmo)
+    freeNormal: null,    // forme libre : normale choisie au gizmo (repère caméra)
+    thumbsDir: null,     // vignettes de la plage, pour choisir l'image de référence
     img: null,           // image de référence
     view: null,          // {s, ox, oy, fit} en pixels canvas
-    show: 'edit',        // 'edit' | 'live' | 'result'
+    show: 'edit',        // 'edit' | 'browse' (timeline avant tracking) | 'live' | 'result'
     live: null,          // aperçu en direct : {img, poly, frame}
-    drag: null,          // {kind:'point', i} | {kind:'pan', x, y}
+    drag: null,          // {kind:'point', i} | {kind:'pan', x, y} | {kind:'rotate', ...}
+    browseImg: null,     // vignette affichée pendant le choix de la référence
     hover: -1,
     space: false,
     result: null,
@@ -96,7 +99,7 @@
   }
 
   // ------------------------------------------------------------------ moteur Python
-  function runEngine(args, onEvent) {
+  function runEngine(args, onEvent, trackable = !!onEvent) {
     return new Promise((resolve, reject) => {
       if (!fs.existsSync(PY)) {
         reject(new Error("Environnement Python introuvable :\n" + PY +
@@ -107,7 +110,7 @@
       // AE ne transmet pas le PATH du Terminal : on ajoute Homebrew pour ffmpeg (métadonnées caméra)
       env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', env.PATH || '/usr/bin:/bin'].join(':');
       const child = cp.spawn(PY, [ENGINE].concat(args), { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] });
-      if (onEvent) state.child = child;  // seul le tracking est « en cours » (arrêtable)
+      if (trackable) state.child = child;  // seul le tracking est « en cours » (arrêtable)
       let buf = '', stderr = '', result = null, error = null;
       child.stdout.on('data', (d) => {
         buf += d;
@@ -159,8 +162,10 @@
     state.points = [];
     state.flip = false;
     state.orientManual = false;
+    state.freeNormal = null;
     state.result = null;
     state.show = 'edit';
+    state.thumbsDir = null;
     const stem = path.basename(sel.file).replace(/\.[^.]+$/, '');
     state.workDir = path.join(ROOT, 'out', 'panel', `${stem}_${stamp()}`);
 
@@ -190,6 +195,7 @@
       await loadImage(fr.path);
       enable('s-surface', true);
       enable('s-track', true);
+      setupBrowse();
     } catch (e) {
       toast(e.message);
     } finally {
@@ -288,31 +294,58 @@
 
   const isDisc = () => state.tool === 'rect' && +$('in-round').value >= 100;
 
-  /** Orientation 3D de la surface sur l'image de référence : {normal, center (pixel)} ou null.
-   *  Rectangle : imposée par les 4 coins et la focale. Disque : idem, au choix près des 2
-   *  inclinaisons possibles. Forme libre : réglée à la main (sinon face caméra, en attendant le mouvement). */
-  function orientation() {
-    const pts = state.points;
+  function rotate(v, axis, ang) { // rotation de Rodrigues autour d'un axe unitaire
+    const c = Math.cos(ang), s = Math.sin(ang), k = dot(axis, v);
+    return add(add(scale(v, c), scale(cross(axis, v), s)), scale(axis, k * (1 - c)));
+  }
+
+  /** Modèle 3D du rectangle déduit des 4 coins : X(a, b) = C + a·eu + b·ev, a et b dans [-½, ½]. */
+  function rectModel() {
+    if (state.points.length !== 4) return null;
+    const H = squareHomography(orderRect(state.points));
+    if (!H) return null;
+    const f = focalPx(), cx = state.img.width / 2, cy = state.img.height / 2;
+    const col = (j) => [(H[0][j] - cx * H[2][j]) / f, (H[1][j] - cy * H[2][j]) / f, H[2][j]];
+    const eu = col(0), ev = col(1);
+    return { C: add(add(scale(eu, 0.5), scale(ev, 0.5)), col(2)), eu, ev };
+  }
+
+  function cornersOf(m) {
+    return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => project(add(m.C, add(scale(m.eu, a / 2), scale(m.ev, b / 2)))));
+  }
+
+  /** Repère 3D de la surface sur l'image de référence (comme dans l'aperçu après tracking) :
+   *  {C, x, y, n (vers l'arrière-plan), model (rectangle) ou grid [a0, a1, b0, b1] (forme libre), auto}. */
+  function gizmo() {
+    if (!state.img || !ready()) return null;
     if (state.tool === 'rect') {
-      if (pts.length !== 4) return null;
-      const q = orderRect(pts), H = squareHomography(q);
-      if (!H) return null;
-      const f = focalPx(), cx = state.img.width / 2, cy = state.img.height / 2;
-      const col = (j) => norm([(H[0][j] - cx * H[2][j]) / f, (H[1][j] - cy * H[2][j]) / f, H[2][j]]);
-      let n = norm(cross(col(0), col(1)));
-      const center = warp(H, 0.5, 0.5), d = ray(center);
-      if (dot(n, d) < 0) n = scale(n, -1);
-      if (isDisc() && state.flip) n = norm(add(scale(d, 2 * dot(n, d)), scale(n, -1))); // inclinaison miroir
-      return { normal: n, center };
+      const m = rectModel();
+      if (!m) return null;
+      let n = norm(cross(m.eu, m.ev));
+      if (dot(n, m.C) < 0) n = scale(n, -1);
+      if (isDisc() && state.flip) { const d = norm(m.C); n = norm(add(scale(d, 2 * dot(n, d)), scale(n, -1))); }
+      const x = norm(add(m.eu, scale(n, -dot(m.eu, n)))), y = cross(n, x);
+      return { C: m.C, x, y, n, model: m };
     }
-    if (pts.length < 3) return null;
+    const pts = state.points;
     const center = [pts.reduce((a, p) => a + p[0], 0) / pts.length, pts.reduce((a, p) => a + p[1], 0) / pts.length];
-    const d = ray(center);
-    if (!state.orientManual) return { normal: d, center, auto: true };
-    const t = +$('in-tilt').value * Math.PI / 180, phi = +$('in-dir').value * Math.PI / 180;
-    const e1 = norm(add([1, 0, 0], scale(d, -d[0]))), e2 = cross(d, e1);
-    const axis = add(scale(e1, Math.cos(phi)), scale(e2, Math.sin(phi)));
-    return { normal: norm(add(scale(d, Math.cos(t)), scale(axis, Math.sin(t)))), center };
+    const C = ray(center);
+    const n = state.orientManual && state.freeNormal ? state.freeNormal : C;  // auto : face caméra en attendant le mouvement
+    const x = norm(add([1, 0, 0], scale(n, -n[0]))), y = cross(n, x);
+    let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+    pts.forEach((p) => { // étendue de la forme sur le plan
+      const r = ray(p), D = add(scale(r, dot(n, C) / dot(n, r)), scale(C, -1));
+      a0 = Math.min(a0, dot(D, x)); a1 = Math.max(a1, dot(D, x));
+      b0 = Math.min(b0, dot(D, y)); b1 = Math.max(b1, dot(D, y));
+    });
+    return { C, x, y, n, grid: [a0, a1, b0, b1], auto: !state.orientManual };
+  }
+
+  /** Normale à transmettre au moteur (disque : tranche entre les 2 inclinaisons ; forme libre : réglage manuel). */
+  function chosenNormal() {
+    const g = gizmo();
+    if (!g || !(isDisc() || (state.tool === 'free' && state.orientManual))) return null;
+    return g.n;
   }
 
   // ------------------------------------------------------------------ éditeur
@@ -321,6 +354,7 @@
 
   function shownImage() {
     if (state.show === 'live' && state.live) return state.live.img;
+    if (state.show === 'browse' && state.browseImg) return state.browseImg;
     return state.show === 'result' && state.previewImg ? state.previewImg : state.img;
   }
 
@@ -414,7 +448,7 @@
       ctx.stroke();
       if (ok) { ctx.fillStyle = 'rgba(60, 224, 122, 0.10)'; ctx.fill(); }
     }
-    if (ok) drawOrientation();
+    if (ok) drawGizmo();
     const labels = ['HG', 'HD', 'BD', 'BG'];
     const ordered = state.tool === 'rect' && pts.length === 4 ? orderRect(pts) : null;
     pts.forEach((p, i) => {
@@ -435,42 +469,51 @@
     if (state.drag && state.drag.kind === 'point') drawLoupe(state.points[state.drag.i]);
   }
 
-  /** Grille en perspective sur le plan + flèche de la normale (vers la caméra). */
-  function drawOrientation() {
-    const o = orientation();
-    if (!o) return;
-    const dpr = window.devicePixelRatio || 1, n = o.normal;
-    const P0 = ray(o.center);                       // point du plan, profondeur ~1
-    const u = norm(add([1, 0, 0], scale(n, -n[0]))), v = cross(n, u);
-    // étendue de la forme sur le plan
-    let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
-    state.points.forEach((p) => {
-      const r = ray(p), X = scale(r, dot(n, P0) / dot(n, r)), D = add(X, scale(P0, -1));
-      a0 = Math.min(a0, dot(D, u)); a1 = Math.max(a1, dot(D, u));
-      b0 = Math.min(b0, dot(D, v)); b1 = Math.max(b1, dot(D, v));
-    });
-    if (state.tool === 'free') { // la grille sert à aligner l'orientation sur les lignes de la scène
-      ctx.lineWidth = 1 * dpr;
-      ctx.strokeStyle = o.auto ? 'rgba(255, 220, 0, 0.25)' : 'rgba(255, 220, 0, 0.6)';
-      const m = 0.25 * Math.max(a1 - a0, b1 - b0);
-      for (let i = 0; i <= 8; i++) {
-        const a = a0 - m + (a1 - a0 + 2 * m) * i / 8, b = b0 - m + (b1 - b0 + 2 * m) * i / 8;
-        polyPath([project(add(P0, add(scale(u, a), scale(v, b0 - m)))), project(add(P0, add(scale(u, a), scale(v, b1 + m))))]);
-        ctx.stroke();
-        polyPath([project(add(P0, add(scale(u, a0 - m), scale(v, b)))), project(add(P0, add(scale(u, a1 + m), scale(v, b))))]);
-        ctx.stroke();
-      }
+  /** Grille 3D sur la surface + axes (X rouge, Y vert, Z bleu vers la caméra) + poignée de rotation. */
+  function drawGizmo() {
+    const g = gizmo();
+    if (!g) return;
+    const dpr = window.devicePixelRatio || 1;
+    const P = (a, b) => (g.model ? add(g.model.C, add(scale(g.model.eu, a), scale(g.model.ev, b)))
+      : add(g.C, add(scale(g.x, a), scale(g.y, b))));
+    let a0 = -0.5, a1 = 0.5, b0 = -0.5, b1 = 0.5;
+    if (g.grid) [a0, a1, b0, b1] = g.grid;
+    ctx.lineWidth = 1 * dpr;
+    ctx.strokeStyle = g.auto ? 'rgba(0, 220, 255, 0.25)' : 'rgba(0, 220, 255, 0.7)';
+    for (let i = 0; i <= 8; i++) {
+      const a = a0 + (a1 - a0) * i / 8, b = b0 + (b1 - b0) * i / 8;
+      polyPath([project(P(a, b0)), project(P(a, b1))]); ctx.stroke();
+      polyPath([project(P(a0, b)), project(P(a1, b))]); ctx.stroke();
     }
-    const L = 0.6 * Math.max(a1 - a0, b1 - b0);
-    const [x0, y0] = toScreen(o.center), [x1, y1] = toScreen(project(add(P0, scale(n, -L))));
-    ctx.lineWidth = 2.5 * dpr;
-    ctx.strokeStyle = o.auto ? 'rgba(74, 163, 255, 0.5)' : '#4aa3ff';
-    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-    const ang = Math.atan2(y1 - y0, x1 - x0), hl = 9 * dpr;
-    ctx.beginPath();
-    ctx.moveTo(x1, y1); ctx.lineTo(x1 - hl * Math.cos(ang - 0.4), y1 - hl * Math.sin(ang - 0.4));
-    ctx.moveTo(x1, y1); ctx.lineTo(x1 - hl * Math.cos(ang + 0.4), y1 - hl * Math.sin(ang + 0.4));
+    const size = g.model ? Math.min(Math.hypot(...g.model.eu), Math.hypot(...g.model.ev))
+      : Math.min(a1 - a0, b1 - b0);
+    const L = 0.5 * size;
+    const o = toScreen(project(g.C));
+    [[g.x, '#ff4d4d'], [g.y, '#3ce07a'], [scale(g.n, -1), '#4aa3ff']].forEach(([axis, col]) => {
+      const e = toScreen(project(add(g.C, scale(axis, L))));
+      ctx.lineWidth = 2.5 * dpr;
+      ctx.strokeStyle = col;
+      ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
+      const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 8 * dpr;
+      ctx.beginPath();
+      ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang - 0.4), e[1] - hl * Math.sin(ang - 0.4));
+      ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang + 0.4), e[1] - hl * Math.sin(ang + 0.4));
+      ctx.stroke();
+    });
+    ctx.beginPath(); // poignée : glisser pour tourner la surface
+    ctx.arc(o[0], o[1], 7 * dpr, 0, 2 * Math.PI);
+    ctx.fillStyle = state.drag && state.drag.kind === 'rotate' ? '#ffffff' : 'rgba(255,255,255,0.85)';
+    ctx.fill();
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeStyle = '#000';
     ctx.stroke();
+  }
+
+  function hitGizmo(x, y) {
+    const g = gizmo();
+    if (!g) return false;
+    const o = toScreen(project(g.C));
+    return Math.hypot(o[0] - x, o[1] - y) < 11 * (window.devicePixelRatio || 1);
   }
 
   /** Loupe x4 autour du point déplacé, dans le coin opposé. */
@@ -511,6 +554,11 @@
       canvas.classList.add('pan');
       return;
     }
+    if (hit < 0 && ev.button === 0 && hitGizmo(x, y)) { // tourner la surface en 3D
+      const g = gizmo();
+      state.drag = { kind: 'rotate', x0: x, y0: y, model: g.model, n0: g.n };
+      return;
+    }
     if (hit >= 0) {
       state.drag = { kind: 'point', i: hit };
     } else {
@@ -534,6 +582,19 @@
       p[1] = Math.max(0, Math.min(state.img.height, p[1]));
       state.points[state.drag.i] = p;
       draw();
+    } else if (state.drag && state.drag.kind === 'rotate') {
+      const d = state.drag, dpr = window.devicePixelRatio || 1, k = 0.008 / dpr;
+      const turn = ev.shiftKey  // Maj : rotation dans le plan de la surface
+        ? (v) => rotate(v, d.n0, (x - d.x0) * k)
+        : (v) => rotate(rotate(v, [0, 1, 0], (x - d.x0) * k), [1, 0, 0], -(y - d.y0) * k);
+      if (d.model) { // rectangle / disque : les coins suivent la rotation
+        state.points = cornersOf({ C: d.model.C, eu: turn(d.model.eu), ev: turn(d.model.ev) });
+      } else {
+        state.freeNormal = norm(turn(d.n0));
+        state.orientManual = true;
+      }
+      invalidateResult();
+      draw();
     } else if (state.drag && state.drag.kind === 'pan') {
       state.view.ox += x - state.drag.x;
       state.view.oy += y - state.drag.y;
@@ -542,6 +603,7 @@
       draw();
     } else if (ev.target === canvas && state.show === 'edit') {
       const h = hitPoint(x, y);
+      canvas.style.cursor = h < 0 && hitGizmo(x, y) ? 'move' : '';
       if (h !== state.hover) { state.hover = h; draw(); }
     }
   });
@@ -597,15 +659,9 @@
   }));
   $('in-round').addEventListener('input', () => { invalidateResult(); refresh(); });
   $('btn-flip').addEventListener('click', () => { state.flip = !state.flip; invalidateResult(); refresh(); });
-  ['in-tilt', 'in-dir'].forEach((id) => $(id).addEventListener('input', () => {
-    state.orientManual = true;
-    invalidateResult();
-    refresh();
-  }));
   $('btn-orient-auto').addEventListener('click', () => {
     state.orientManual = false;
-    $('in-tilt').value = '0';
-    $('in-dir').value = '0';
+    state.freeNormal = null;
     invalidateResult();
     refresh();
   });
@@ -623,15 +679,17 @@
     let hint = '';
     if (state.show === 'result') hint = 'Aperçu du résultat : vert = zone suivie, cyan = surface 3D.';
     else if (state.show === 'live') hint = 'Suivi en cours : arrêtez dès que la zone verte décroche, ce qui est déjà tracké est gardé.';
+    else if (state.show === 'browse') hint = 'Relâchez sur une image nette où la surface est bien visible : elle devient la référence.';
     else if (state.img && state.tool === 'rect') {
       hint = n < 4 ? `Cliquez les 4 coins (${n}/4). Arrondi à fond = disque.`
-        : isDisc() ? 'Disque : ajustez les coins pour que le cercle épouse le bord. Flèche bleue = inclinaison (⇅ pour l\'inverser).'
+        : isDisc() ? 'Disque : ajustez les coins pour que le cercle épouse le bord ; ⇅ inverse l\'inclinaison.'
           : round > 0 ? 'Placez les coins là où les bords droits se rejoindraient (pointillés).'
-            : 'Prêt. La flèche bleue montre l\'orientation déduite des coins.';
+            : 'Prêt.';
+      if (n === 4) hint += ' Glissez la poignée blanche pour tourner la surface (Maj : dans son plan).';
     } else if (state.img) {
       hint = n < 3 ? `Cliquez le contour d'une zone plane (${n}/3 min.).`
-        : state.orientManual ? 'Alignez la grille sur des lignes de la scène avec Inclinaison et Direction.'
-          : 'Orientation : déduite du mouvement au tracking (ou réglez-la ci-dessous).';
+        : state.orientManual ? 'Grille alignée à la main : elle sera utilisée telle quelle.'
+          : 'Orientation déduite du mouvement au tracking. Pour l\'imposer, glissez la poignée blanche jusqu\'à aligner la grille sur la scène.';
     }
     if (state.img && state.show === 'edit') hint += ' Molette : zoom · Espace : déplacer · Double-clic : recadrer.';
     $('hint').textContent = hint;
@@ -639,12 +697,9 @@
     $('round-wrap').classList.toggle('hidden', state.tool !== 'rect');
     $('btn-flip').classList.toggle('hidden', !isDisc());
     $('btn-flip').classList.toggle('on', state.flip);
-    $('orient-wrap').classList.toggle('hidden', state.tool !== 'free');
-    $('tilt-val').textContent = `${$('in-tilt').value}°`;
-    $('dir-val').textContent = `${$('in-dir').value}°`;
-    $('btn-orient-auto').disabled = !state.orientManual;
+    $('orient-wrap').classList.toggle('hidden', !(state.tool === 'free' && state.orientManual));
     $('btn-track').disabled = !ready() || !!state.child || !inCEP;
-    $('live-badge').classList.toggle('hidden', state.show !== 'live' || !state.live);
+    $('live-badge').classList.toggle('hidden', !((state.show === 'live' && state.live) || state.show === 'browse'));
     draw();
   }
 
@@ -657,9 +712,60 @@
     $('summary').innerHTML = '';
     $('result-actions').classList.add('hidden');
     $('apply-msg').classList.add('hidden');
-    $('scrub').disabled = true;
-    $('btn-play').disabled = true;
-    $('frame-label').textContent = '—';
+    resetTimeline();
+  }
+
+  // ------------------------------------------------------------------ timeline avant tracking
+  /** La timeline parcourt la plage du calque ; relâcher choisit l'image de référence. */
+  function resetTimeline() {
+    const sh = state.shot, sc = $('scrub');
+    if (!sh) return;
+    sc.min = String(sh.rangeStart);
+    sc.max = String(sh.rangeEnd);
+    sc.value = String(sh.frame);
+    sc.disabled = false;
+    $('btn-play').disabled = false;
+    $('frame-label').textContent = `réf ${sh.frame}`;
+  }
+
+  function setupBrowse() {
+    resetTimeline();
+    if (!inCEP) return;
+    const sh = state.shot, dir = path.join(state.workDir, 'thumbs');
+    state.thumbsDir = dir;  // les vignettes apparaissent au fil de l'eau (~6 s pour 200 images 4K)
+    runEngine(['thumbs', sh.file, String(sh.rangeStart), String(sh.rangeEnd), dir], () => {}, false).catch(() => {});
+  }
+
+  function browseTo(i) {
+    $('frame-label').textContent = String(i);
+    const p = state.thumbsDir && path.join(state.thumbsDir, String(i).padStart(5, '0') + '.jpg');
+    if (!p || !fs.existsSync(p)) {
+      $('live-badge').textContent = `Image ${i} — vignettes en préparation…`;
+      return;
+    }
+    $('live-badge').textContent = `Image ${i} — relâchez pour en faire la référence`;
+    const img = new Image();
+    img.onload = () => { state.browseImg = img; if (state.show === 'browse') draw(); };
+    img.src = fileUrl(p);
+  }
+
+  async function setReference(i) {
+    const sh = state.shot;
+    if (sh && i !== sh.frame) {
+      $('live-badge').textContent = `Chargement de l'image ${i}…`;
+      try {
+        const fr = await runEngine(['frame', sh.file, String(i), path.join(state.workDir, `ref_${i}.jpg`)]);
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = fileUrl(fr.path); });
+        state.img = img;
+        sh.frame = i;
+      } catch (e) {
+        toast(e.message || `Impossible de lire l'image ${i}.`);
+      }
+    }
+    state.show = 'edit';
+    resetTimeline();
+    refresh();
   }
 
   async function track() {
@@ -674,10 +780,8 @@
       '--out-dir', path.join(state.workDir, `run${++state.runCount}`),
       '--name', sh.footageName.replace(/\.[^.]+$/, '')];
     if (state.tool === 'rect') args.push('--roundness', String(+$('in-round').value / 100));
-    const o = orientation();
-    if (o && (isDisc() || (state.tool === 'free' && state.orientManual))) {
-      args.push('--normal', o.normal.map((x) => x.toFixed(6)).join(','));
-    }
+    const normal = chosenNormal();
+    if (normal) args.push('--normal', normal.map((x) => x.toFixed(6)).join(','));
     const focal = parseFloat($('in-focal').value);
     if (focal > 0) args.push('--focal-mm', String(focal));
 
@@ -786,9 +890,17 @@
 
   $('scrub').addEventListener('input', () => {
     const i = +$('scrub').value;
-    if (state.show !== 'result') { state.show = 'result'; refresh(); }
-    showFrame(i);
+    if (state.result) {
+      if (state.show !== 'result') { state.show = 'result'; refresh(); }
+      showFrame(i);
+    } else {
+      if (state.show !== 'browse') { state.show = 'browse'; refresh(); }
+      browseTo(i);
+    }
     syncAE(i);
+  });
+  $('scrub').addEventListener('change', () => {
+    if (!state.result && !state.playTimer) setReference(+$('scrub').value);
   });
   $('chk-flip').addEventListener('change', () => showFrame(+$('scrub').value));
 
@@ -798,16 +910,21 @@
     $('btn-play').textContent = '▶';
   }
   $('btn-play').addEventListener('click', () => {
-    if (state.playTimer) { stopPlay(); syncAE(+$('scrub').value); return; }
+    if (state.playTimer) {
+      stopPlay();
+      syncAE(+$('scrub').value);
+      if (!state.result) setReference(+$('scrub').value);  // avant tracking : la pause choisit la référence
+      return;
+    }
     $('btn-play').textContent = '❚❚';
-    state.show = 'result';
+    state.show = state.result ? 'result' : 'browse';
     refresh();
     const fps = Math.min(25, state.shot.fps || 25);
     state.playTimer = setInterval(() => {
       const sc = $('scrub');
       const i = +sc.value >= +sc.max ? +sc.min : +sc.value + 1;
       sc.value = String(i);
-      showFrame(i);
+      if (state.result) showFrame(i); else browseTo(i);
     }, 1000 / fps);
   });
 

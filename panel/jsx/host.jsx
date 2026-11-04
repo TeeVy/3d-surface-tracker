@@ -114,13 +114,17 @@ function stDescribe(comp, sel, time) {
     }
     var fps = src.frameRate;
     var srcFrames = Math.round(src.duration * fps);
-    var first = Math.max(0, Math.ceil(lo * fps - 1e-6));
+    // AE affiche l'image du rush qui commence au plus tard à l'instant demandé (arrondi par
+    // défaut) : on calcule de la même façon la plage et l'image courante, sinon une cadence de
+    // rush différente de celle de la compo (29,97 dans 25 i/s…) décale d'une image.
+    var first = Math.max(0, Math.floor(lo * fps + 1e-6));
     var last = Math.min(srcFrames - 1, Math.ceil(hi * fps - 1e-6) - 1);
     if (last < first) return stFail("Le calque n'est visible sur aucune image de la composition.");
-    var frame = Math.round((time - offset) * fps);
+    var frame = Math.floor((time - offset) * fps + 1e-6);
     if (frame < first || frame > last) {
-        warnings.push("L'instant courant est hors de la partie visible du calque : l'image de référence est ramenée à " +
-                      (frame < first ? "sa première" : "sa dernière") + " image.");
+        warnings.push("L'instant courant (image " + frame + " du rush) est hors de la partie visible du calque (images " +
+                      first + " à " + last + ") : la référence part de l'image " + (frame < first ? first : last) +
+                      ". Choisissez-la dans la timeline du panneau.");
         frame = Math.min(last, Math.max(first, frame));
     }
     return stJSON({

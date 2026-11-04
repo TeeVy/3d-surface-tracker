@@ -48,14 +48,9 @@
       <div id="canvas-empty">L'image du calque s'affichera ici.</div>
     </div>
     <div id="hint" class="hint"></div>
-    <!-- Forme libre : orientation réglable à la main -->
+    <!-- Forme libre : orientation réglée au gizmo -->
     <div id="orient-wrap" class="orient hidden">
-      <label class="inline grow">Inclinaison
-        <input id="in-tilt" type="range" min="0" max="80" step="1" value="0"><span id="tilt-val" class="mono">0°</span>
-      </label>
-      <label class="inline grow">Direction
-        <input id="in-dir" type="range" min="0" max="359" step="1" value="0"><span id="dir-val" class="mono">0°</span>
-      </label>
+      <span class="dim">Orientation réglée à la main</span>
       <button id="btn-orient-auto" class="small" title="Laisser le mouvement décider de l'orientation">Auto</button>
     </div>
     <!-- Focale : seulement si la vidéo n'a pas de métadonnées -->
