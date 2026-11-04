@@ -35,18 +35,25 @@ s'ouvre avec ce calque chargé. Seule la partie du rush visible dans la compo se
 > autoriser les scripts à écrire des fichiers : *Préférences > Scripts et expressions*.
 > Le bouton ↻ du panneau charge aussi le calque sélectionné.
 
-1. **Surface** :
+1. **Image de référence** : la timeline parcourt le plan dès le chargement (vignettes générées en
+   quelques secondes). Relâchez le curseur, ou mettez la lecture en pause, sur une image nette où la
+   surface est bien visible : elle devient la référence. Le suivi partira de là, vers l'avant puis
+   vers l'arrière.
+2. **Surface** :
    - **Rectangle** : cliquez les 4 coins. Le curseur d'arrondi suit les coins arrondis ; à fond, la
-     forme devient un **disque**, et ⇅ inverse son inclinaison (flèche bleue).
+     forme devient un **disque**, et ⇅ inverse son inclinaison.
    - **Forme libre** : cliquez le contour d'une zone plane. Son orientation est déduite du mouvement,
-     ou réglée à la main avec *Inclinaison* et *Direction*, en alignant la grille sur la scène.
+     ou réglée au gizmo en alignant la grille sur la scène (*Auto* pour revenir au mouvement).
+   - Le **gizmo 3D** (grille et axes, comme dans l'aperçu final) montre l'orientation dès la création.
+     Glissez sa poignée blanche pour tourner la surface (Maj : rotation dans son plan). Pour un
+     rectangle ou un disque, les coins suivent.
    - Pour ajuster la vue : molette pour zoomer, Espace ou clic droit pour la déplacer, double-clic pour
      la recadrer. Glissez un point pour le corriger (une loupe s'affiche), clic droit pour le supprimer.
-   - La flèche bleue montre l'orientation 3D de la surface dès sa création.
    - Si la vidéo n'a pas de métadonnées de focale, un champ apparaît pour la saisir.
-2. **Tracker** : le suivi s'affiche en direct. *■ Arrêter* stoppe dès que ça décroche, en gardant les
-   images déjà trackées.
-3. **Résultat** : parcourez l'aperçu sur la même ligne (l'instant d'AE suit), puis cliquez
+3. **Tracker** : le suivi s'affiche en direct. *■ Arrêter* stoppe dès que ça décroche, en gardant les
+   images déjà trackées. Sur une surface brillante (reflets), prenez ses bords et ses coins dans la
+   zone suivie : les reflets glissent quand la caméra bouge, pas les arêtes.
+4. **Résultat** : parcourez l'aperçu sur la même ligne (l'instant d'AE suit), puis cliquez
    *Appliquer dans AE*. La surface est animée et la caméra AE reste fixe, ce qui est juste pour tout
    contenu posé sur la surface, que l'objet ou la caméra bouge.
 
