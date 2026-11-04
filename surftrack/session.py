@@ -67,6 +67,10 @@ class Session:
     def __init__(self, video, seq, thumbs_dir, thumb_side=720):
         self.video = video
         self.src = np.asarray(seq["src"], int)
+        # rendu d'AE (effets, stabilisation…) : la focale vient du rush d'origine, image par image
+        self.lens_video = seq.get("lens_src") or video
+        self.lens_frames = np.asarray(seq.get("lens_frames") or seq["src"], int)
+        self.focal_scale = float(seq.get("focal_scale") or 1.0)
         self.comp_fps = float(seq["fps"])
         self.seq_start = int(seq["start"])
         self.W, self.H = video_size(video)
@@ -80,7 +84,7 @@ class Session:
         self.cond = threading.Condition()
         self.load_error = None
         self.stop = threading.Event()
-        self.lens = read_lens_info(video)
+        self.lens = read_lens_info(self.lens_video)
 
     # ------------------------------------------------------------------ images
     def load_all(self):
@@ -195,8 +199,8 @@ class Session:
             logs.append(m)
             emit(type="log", msg=m)
 
-        focal, source = choose_focal(self.video, surf, track, self.W, self.H, None, c.get("focal_mm"), 36.0,
-                                     self.src, log)
+        focal, source = choose_focal(self.lens_video, surf, track, self.W, self.H, None, c.get("focal_mm"), 36.0,
+                                     self.lens_frames, log, scale=self.focal_scale)
         frames = _Frames(self)
         sol = solve(track, surf, self.W, self.H, focal, normal_hint=c.get("normal"), frames_small=frames,
                     track_scale=self.scale, log=log)

@@ -112,8 +112,9 @@ def _lens(video):
 
 
 def choose_focal(video, surface, track, W, H, focal_px=None, focal_mm=None, sensor_mm=36.0,
-                 src_frames=None, log=print):
+                 src_frames=None, log=print, scale=1.0):
     """Focale de chaque image : saisie > métadonnées caméra > estimation > 50 mm.
+    scale : agrandissement du rush dans l'image suivie (rendu d'une compo où il est mis à l'échelle).
     src_frames[i] : image du fichier montrée à l'image i de la séquence (zoom image par image)."""
     n = len(track.homographies)
     src = np.arange(n) if src_frames is None else np.asarray(src_frames, int)
@@ -132,8 +133,8 @@ def choose_focal(video, surface, track, W, H, focal_px=None, focal_mm=None, sens
     else:
         lens = _lens(video)
         if lens:
-            focal = lens.focal_px_per_frame(W, H, int(src.max()) + 1)[src]
-            mm = (focal / max(W, H) * 36.0)[ok] if ok.any() else focal / max(W, H) * 36.0
+            focal = lens.focal_px_per_frame(W, H, int(src.max()) + 1)[src] * scale
+            mm = (focal / scale / max(W, H) * 36.0)[ok] if ok.any() else focal / scale / max(W, H) * 36.0
             if lens.varies and np.ptp(mm) > 0.05:
                 source = (f"métadonnées {lens.camera} / {lens.lens} : zoom de {mm.min():.1f} à "
                           f"{mm.max():.1f} mm éq. 35 mm, image par image")

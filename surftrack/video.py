@@ -1,6 +1,7 @@
 """Lecture vidéo."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,9 +17,55 @@ class Clip:
     start: int = 0      # indice (dans le fichier) de la 1re image chargée
 
 
+_IMG_EXT = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+
+
+def _image_files(path):
+    """Séquence d'images (rendu d'After Effects) : un dossier, images triées par nom. None sinon."""
+    p = Path(path)
+    if not p.is_dir():
+        return None
+    files = sorted(f for f in p.iterdir() if f.suffix.lower() in _IMG_EXT and not f.name.startswith("."))
+    if not files:
+        raise IOError(f"Aucune image dans le dossier : {path}")
+    return files
+
+
+class _SeqCapture:
+    """Lecture d'une séquence d'images avec la même interface que cv2.VideoCapture."""
+
+    def __init__(self, files, fps=25.0):
+        self.files, self.i, self.fps = files, 0, fps
+
+    def isOpened(self):
+        return True
+
+    def set(self, prop, value):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            self.i = int(value)
+
+    def get(self, prop):
+        return {cv2.CAP_PROP_FRAME_COUNT: len(self.files), cv2.CAP_PROP_FPS: self.fps}.get(prop, 0)
+
+    def read(self):
+        if self.i >= len(self.files):
+            return False, None
+        img = cv2.imread(str(self.files[self.i]), cv2.IMREAD_COLOR)
+        self.i += 1
+        return img is not None, img
+
+    def release(self):
+        pass
+
+
+def capture(path):
+    files = _image_files(path)
+    return _SeqCapture(files) if files is not None else cv2.VideoCapture(str(path))
+
+
 def _open_at(path, start):
     """Ouvre la vidéo positionnée sur l'image `start` (saut exact vérifié sur les fichiers XAVC)."""
-    cap = cv2.VideoCapture(str(path))
+    cap = capture(path)
     if not cap.isOpened():
         raise IOError(f"Impossible d'ouvrir la vidéo : {path}")
     if start > 0:
@@ -27,7 +74,7 @@ def _open_at(path, start):
 
 
 def frame_count(path):
-    cap = cv2.VideoCapture(str(path))
+    cap = capture(path)
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
     return n
@@ -58,7 +105,7 @@ def load_gray(path, max_frames=None, scale=1.0, start=0, end=None):
 
 
 def video_size(path):
-    cap = cv2.VideoCapture(str(path))
+    cap = capture(path)
     ok, img = cap.read()
     cap.release()
     if not ok:

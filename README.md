@@ -39,6 +39,12 @@ Le panneau suit **exactement les images que montre la compo** : précomps, remap
 étirement compris (une image figée ou un ralenti sont suivis tels quels). Les images clés sont
 posées sur les images de la compo.
 
+Si un **effet** change l'image entre le fichier et la compo (Stabilisation de déformation, Transformer,
+correction d'objectif…), ou si la vidéo est déplacée ou recadrée, le panneau fait **rendre le calque
+par After Effects** à l'ouverture (le calque est mis en solo le temps du rendu, la file d'attente de
+rendu est laissée telle quelle) et suit ce rendu. Comptez le temps d'un rendu de la plage. La focale
+reste lue dans le rush d'origine ; un éventuel zoom automatique de la stabilisation n'est pas compté.
+
 1. **Image de référence** : à l'ouverture, une seule lecture du plan charge les images en mémoire et
    prépare les vignettes de la timeline (bande grise). Cliquez ou glissez dans la timeline, ou
    utilisez ← → (Maj : 10 images), jusqu'à une image nette où la surface est bien visible. Avant tout

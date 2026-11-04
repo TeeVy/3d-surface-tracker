@@ -86,9 +86,17 @@ function stSourceFrame(chain, t, fps, srcFrames) {
     return (f < 0 || f >= srcFrames) ? -1 : f;
 }
 
+// Noms des effets actifs d'un calque (ils peuvent déplacer les pixels : stabilisation…).
+function stActiveEffects(L) {
+    var out = [], fx = L.property("ADBE Effect Parade");
+    if (!fx) return out;
+    for (var i = 1; i <= fx.numProperties; i++) if (fx.property(i).active) out.push(fx.property(i).name);
+    return out;
+}
+
 function stDescribe(comp, sel, time) {
     var L = sel;
-    var warnings = [], names = [], chain = [];
+    var warnings = [], names = [], chain = [], effects = [];
     var Ax = 1, Ay = 1, Bx = 0, By = 0;     // pixel compo = A * pixel du calque courant + B
     var retimed = false;
 
@@ -96,6 +104,8 @@ function stDescribe(comp, sel, time) {
         if (!(L instanceof AVLayer) || !L.source) return stFail("Le calque « " + L.name + " » n'est ni une vidéo ni un précomp.");
         chain.push(L);
         names.push(L.name);
+        var fxs = stActiveEffects(L);
+        for (var fi = 0; fi < fxs.length; fi++) effects.push(fxs[fi] + " (" + L.name + ")");
         if (L.timeRemapEnabled || !stNear(L.stretch, 100, 0.01)) retimed = true;
         var tr = L.property("ADBE Transform Group");
         var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
@@ -116,13 +126,15 @@ function stDescribe(comp, sel, time) {
     var src = L.source;
     if (!stIsVideoFootage(src)) return stFail("Aucune vidéo trouvée sous le calque sélectionné (trop de niveaux de précomp ?).");
 
+    // Si des effets (stabilisation…) ou un recadrage changent l'image entre le fichier et la
+    // compo, on ne peut pas suivre le fichier : AE rendra le calque tel que la compo le montre.
     var k = comp.width / src.width;
-    if (!stNear(Ax, k, 0.002 * k) || !stNear(Ay, k, 0.002 * k) || !stNear(Bx, 0, 1) || !stNear(By, 0, 1)) {
-        warnings.push("La vidéo est déplacée, recadrée ou mise à l'échelle entre le fichier et la compo : " +
-                      "la surface 3D sera décalée. Le calque doit remplir la compo tel quel.");
-    } else if (!stNear(k, 1, 0.0001)) {
-        warnings.push("La vidéo (" + src.width + "x" + src.height + ") est mise à l'échelle de la compo (" +
-                      comp.width + "x" + comp.height + ") : le résultat aussi.");
+    var moved = !stNear(Ax, k, 0.002 * k) || !stNear(Ay, k, 0.002 * k) || !stNear(Bx, 0, 1) || !stNear(By, 0, 1);
+    var render = moved || effects.length > 0;
+    var renderWhy = effects.length ? "effets : " + effects.join(", ") : moved ? "vidéo déplacée ou recadrée dans la compo" : "";
+    if (moved) {
+        warnings.push("La vidéo est déplacée ou recadrée dans la compo : le suivi est juste, mais l'axe optique " +
+                      "n'est plus au centre de l'image, la 3D peut être légèrement faussée.");
     }
 
     // Image du fichier montrée à chaque image de la compo où le calque est visible :
@@ -151,8 +163,60 @@ function stDescribe(comp, sel, time) {
         ok: true, compId: comp.id, compName: comp.name, compW: comp.width, compH: comp.height,
         compFps: 1 / fd, layerIndex: sel.index, layerName: sel.name,
         footageName: L.name, chain: names, file: src.file.fsName, fps: fps, srcFrames: srcFrames,
-        seqStart: seqStart, frames: frames, cur: cur, retimed: retimed, warnings: warnings
+        seqStart: seqStart, frames: frames, cur: cur, retimed: retimed, warnings: warnings,
+        render: render, renderWhy: renderWhy,
+        // agrandissement du rush dans la compo, par rapport à une vidéo qui la remplit tout juste
+        focalScale: Ax * src.width / comp.width
     });
+}
+
+// Rend le calque tel que la compo le montre (effets compris), images seqStart à seqStart+n-1
+// de la compo, dans outDir. Le calque est mis en solo le temps du rendu ; les autres éléments
+// de la file d'attente sont mis de côté puis rétablis.
+function stRenderLayer(compId, layerIndex, seqStart, n, outDir) {
+    var comp = stFindComp(compId);
+    if (!comp) return stFail("Composition introuvable.");
+    if (layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
+    var sel = comp.layer(layerIndex);
+    var rq = app.project.renderQueue, solos = [], queued = [], item = null, i;
+    var folder = new Folder(outDir);
+    if (!folder.exists) folder.create();
+    try {
+        for (i = 1; i <= comp.numLayers; i++) {
+            var L = comp.layer(i);
+            if (L instanceof AVLayer) { solos.push([L, L.solo]); L.solo = (i === layerIndex); }
+        }
+        for (i = 1; i <= rq.numItems; i++) {
+            if (rq.item(i).status === RQItemStatus.QUEUED) { queued.push(rq.item(i)); rq.item(i).render = false; }
+        }
+        item = rq.items.add(comp);
+        item.timeSpanStart = seqStart * comp.frameDuration;
+        item.timeSpanDuration = n * comp.frameDuration;
+        var om = item.outputModule(1);
+        var fmt = "", names = ["JPEG Sequence", "Séquence JPEG", "PNG Sequence", "Séquence PNG", "TIFF Sequence", "Séquence TIFF"];
+        for (i = 0; i < names.length && !fmt; i++) {
+            try {
+                om.setSettings({"Format": names[i]});
+                var got = om.getSettings(GetSettingsFormat.STRING)["Format"];
+                if (got && /JPEG|PNG|TIFF/i.test(got)) fmt = got;
+            } catch (e) { /* format inconnu dans cette version */ }
+        }
+        if (!fmt) {  // repli : un modèle de sortie en séquence d'images s'il y en a un
+            for (i = 0; i < om.templates.length && !fmt; i++) {
+                if (/PNG|TIFF|JPEG/i.test(om.templates[i])) { om.applyTemplate(om.templates[i]); fmt = om.templates[i]; }
+            }
+        }
+        var ext = /PNG/i.test(fmt) ? "png" : /TIFF/i.test(fmt) ? "tif" : /JPEG/i.test(fmt) ? "jpg" : "mov";
+        om.file = new File(folder.fsName + "/st_[#####]." + ext);
+        rq.render();
+    } catch (e) {
+        return stFail("Rendu impossible : " + e.toString());
+    } finally {
+        try { if (item) item.remove(); } catch (e2) {}
+        for (i = 0; i < queued.length; i++) { try { queued[i].render = true; } catch (e3) {} }
+        for (i = 0; i < solos.length; i++) { try { solos[i][0].solo = solos[i][1]; } catch (e4) {} }
+    }
+    return stJSON({ok: true, dir: folder.fsName, format: fmt});
 }
 
 function stFindComp(compId) {

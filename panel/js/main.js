@@ -258,9 +258,10 @@
     state.k = state.ref = sel.cur;
     const stem = path.basename(sel.file).replace(/\.[^.]+$/, '');
     state.workDir = path.join(ROOT, 'out', 'panel', `${stem}_${stamp()}`);
-    // vignettes gardées d'une fois sur l'autre pour un même fichier
+    // vignettes gardées d'une fois sur l'autre pour un même fichier (pas pour un rendu : il change)
     const st = fs.statSync(sel.file);
-    state.thumbsDir = path.join(ROOT, 'out', 'panel', 'cache', `${stem}_${st.size}_${Math.round(st.mtimeMs)}`);
+    state.thumbsDir = sel.render ? path.join(state.workDir, 'thumbs')
+      : path.join(ROOT, 'out', 'panel', 'cache', `${stem}_${st.size}_${Math.round(st.mtimeMs)}`);
 
     const via = sel.chain.length > 1 ? ` <span class="dim">via ${sel.chain.slice(1).map(escapeHtml).join(' › ')}</span>` : '';
     $('shot-empty').classList.add('hidden');
@@ -273,6 +274,7 @@
     w.innerHTML = '';
     const note = (m, cls) => { const li = document.createElement('li'); li.textContent = m; if (cls) li.className = cls; w.appendChild(li); };
     sel.warnings.forEach((m) => note(m));
+    if (sel.render) note(`Image modifiée dans la compo (${sel.renderWhy}) : AE rend le calque tel qu'il apparaît, et c'est ce rendu qui est suivi.`, 'note');
     if (sel.retimed) note('Remappage temporel ou étirement pris en compte : le suivi porte sur les images telles que la compo les montre.', 'note');
     $('summary').innerHTML = '';
     $('apply-msg').classList.add('hidden');
@@ -282,9 +284,15 @@
     try {
       fs.mkdirSync(state.workDir, { recursive: true });
       const seq = path.join(state.workDir, 'seq.json');
-      fs.writeFileSync(seq, JSON.stringify({ src: sel.frames, fps: sel.compFps, start: sel.seqStart }));
+      let video = sel.file, spec = { src: sel.frames, fps: sel.compFps, start: sel.seqStart };
+      if (sel.render) {
+        video = await renderLayer(sel);
+        spec = { src: sel.frames.map((_, i) => i), fps: sel.compFps, start: sel.seqStart,
+          lens_src: sel.file, lens_frames: sel.frames, focal_scale: sel.focalScale };
+      }
+      fs.writeFileSync(seq, JSON.stringify(spec));
       const ready = new Promise((resolve) => {
-        state.eng = startEngine([sel.file, seq, state.thumbsDir], (ev) => {
+        state.eng = startEngine([video, seq, state.thumbsDir], (ev) => {
           if (ev.type === 'ready') resolve(ev); else onEngineEvent(ev);
         });
       });
@@ -302,6 +310,32 @@
       $('btn-load').disabled = false;
       refresh();
     }
+  }
+
+  /** Fait rendre le calque par AE (effets compris) ; renvoie le dossier d'images ou le fichier rendu. */
+  async function renderLayer(sel) {
+    const dir = path.join(state.workDir, 'render');
+    const n = sel.frames.length;
+    $('canvas-empty').textContent = `Rendu du calque par After Effects (${sel.renderWhy})…`;
+    const poll = setInterval(() => {  // AE est occupé pendant le rendu : on suit les fichiers écrits
+      let k = 0;
+      try { k = fs.readdirSync(dir).filter((f) => f.indexOf('st_') === 0).length; } catch (e) { /* pas encore créé */ }
+      $('canvas-empty').textContent = `Rendu du calque par After Effects… ${k}/${n}\n(${sel.renderWhy})`;
+    }, 500);
+    let r;
+    try {
+      r = await host('stRenderLayer', sel.compId, sel.layerIndex, sel.seqStart, n, dir);
+    } finally {
+      clearInterval(poll);
+      $('canvas-empty').textContent = "L'image du calque s'affichera ici.";
+    }
+    if (!r.ok) throw new Error(r.msg);
+    const files = fs.readdirSync(dir).filter((f) => f.indexOf('st_') === 0).sort();
+    if (!files.length) throw new Error("Le rendu d'After Effects n'a produit aucun fichier dans :\n" + dir);
+    if (files.length === 1 && /\.(mov|mp4|avi)$/i.test(files[0])) return path.join(dir, files[0]);
+    if (files.length !== n) log(`⚠ Rendu : ${files.length} images pour ${n} attendues.`);
+    log(`Rendu d'After Effects (${r.format || 'format par défaut'}) : ${files.length} fichier(s).`);
+    return dir;
   }
 
   // ------------------------------------------------------------------ images
