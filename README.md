@@ -23,28 +23,32 @@ Installation (une seule fois, puis redémarrer After Effects) :
 ln -sfn "$PWD/panel" ~/Library/Application\ Support/Adobe/CEP/extensions/com.surftrack.panel
 ```
 
-Le panneau s'ouvre via *Fenêtre > Extensions > 3D Surface Tracker*. Il faut que le mode développeur
-CEP soit activé (`defaults read com.adobe.CSXS.12 PlayerDebugMode` doit renvoyer 1, ce qui est le cas sur ce Mac).
+Le mode développeur CEP doit être activé : `defaults read com.adobe.CSXS.12 PlayerDebugMode` doit
+renvoyer 1, ce qui est le cas sur ce Mac.
 
-1. **Plan** : dans la compo, sélectionnez le calque vidéo (ou le précomp qui le contient) et placez
-   l'instant courant sur une image où la surface est bien visible, puis cliquez *Charger le calque
-   sélectionné*. Seule la partie du rush visible dans la compo sera trackée (modifiable dans les
-   réglages avancés).
-2. **Surface** : choisissez un outil dans la barre, puis cliquez sur l'image :
-   - *Rectangle* : les 4 coins (écran, étiquette, boîte) ;
-   - *Disque* : des points sur le bord (couvercle, tête ronde) ;
-   - *Forme libre* : le contour d'une zone plane quelconque. Son orientation est déduite du
-     mouvement, il faut donc que la caméra ou l'objet se déplace un peu.
+**Lancement** : branchez le script `ae_scripts/Tracker le calque.jsx` sur un bouton Code Runner, ou
+lancez-le via *Fichier > Scripts*. Sélectionnez le calque vidéo (ou le précomp qui le contient), placez
+l'instant courant sur une image où la surface est bien visible, puis cliquez le bouton. Le panneau
+s'ouvre avec ce calque chargé. Seule la partie du rush visible dans la compo sera trackée.
 
-   Pour ajuster :
-   - molette pour zoomer, Espace ou clic droit pour déplacer la vue ;
-   - glissez un point pour le corriger (une loupe s'affiche) ;
-   - clic droit sur un point pour le supprimer.
-3. **Tracker** : le suivi s'affiche en direct. *Arrêter et garder* stoppe dès que ça décroche, en
-   conservant les images déjà trackées. Le moteur détecte aussi qui bouge (l'objet ou la caméra), ce
-   qui décide de ce qui est animé dans AE. Le mode peut être forcé dans les réglages avancés.
-4. **Résultat** : parcourez l'aperçu (l'instant d'AE suit). Si l'inclinaison est ambiguë, comparez avec
-   *Inclinaison inversée*. Cliquez ensuite *Appliquer dans After Effects*.
+> Le script dépose sa demande dans `~/Library/Application Support/3D Surface Tracker/`. AE doit donc
+> autoriser les scripts à écrire des fichiers : *Préférences > Scripts et expressions*.
+> Le bouton ↻ du panneau charge aussi le calque sélectionné.
+
+1. **Surface** :
+   - **Rectangle** : cliquez les 4 coins. Le curseur d'arrondi suit les coins arrondis ; à fond, la
+     forme devient un **disque**, et ⇅ inverse son inclinaison (flèche bleue).
+   - **Forme libre** : cliquez le contour d'une zone plane. Son orientation est déduite du mouvement,
+     ou réglée à la main avec *Inclinaison* et *Direction*, en alignant la grille sur la scène.
+   - Pour ajuster la vue : molette pour zoomer, Espace ou clic droit pour la déplacer, double-clic pour
+     la recadrer. Glissez un point pour le corriger (une loupe s'affiche), clic droit pour le supprimer.
+   - La flèche bleue montre l'orientation 3D de la surface dès sa création.
+   - Si la vidéo n'a pas de métadonnées de focale, un champ apparaît pour la saisir.
+2. **Tracker** : le suivi s'affiche en direct. *■ Arrêter* stoppe dès que ça décroche, en gardant les
+   images déjà trackées.
+3. **Résultat** : parcourez l'aperçu sur la même ligne (l'instant d'AE suit), puis cliquez
+   *Appliquer dans AE*. La surface est animée et la caméra AE reste fixe, ce qui est juste pour tout
+   contenu posé sur la surface, que l'objet ou la caméra bouge.
 
 Les fichiers de chaque session sont dans `out/panel/`.
 

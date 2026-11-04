@@ -105,14 +105,46 @@ def square_corners_on_plane(c3, n, r, K):
 
 
 # --------------------------------------------------------------------- surfaces
+def unit_square_homography(corners):
+    """Homographie du carré unité [0,1]² vers les 4 coins (HG, HD, BD, BG)."""
+    src = np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
+    return cv2.getPerspectiveTransform(src, np.float32(corners)).astype(np.float64)
+
+
+def rounded_outline(corners, roundness, per_arc=12):
+    """Contour d'un rectangle aux coins arrondis, vu en perspective.
+
+    roundness 0..1 : rayon des arrondis en fraction de la demi-largeur (même
+    construction que dans le panneau : arcs dans le carré unité, puis homographie)."""
+    r = 0.5 * float(np.clip(roundness, 0, 1))
+    if r <= 1e-6:
+        return np.asarray(corners, np.float64)
+    pts = []
+    for cx, cy, a0 in ((1 - r, r, -90), (1 - r, 1 - r, 0), (r, 1 - r, 90), (r, r, 180)):
+        for a in np.radians(np.linspace(a0, a0 + 90, per_arc)):
+            pts.append((cx + r * np.cos(a), cy + r * np.sin(a)))
+    return warp_points(unit_square_homography(corners), pts)
+
+
+def inscribed_conic(corners):
+    """Image du cercle inscrit dans le carré dont les coins sont donnés."""
+    H = unit_square_homography(corners)
+    C0 = ellipse_conic((0.5, 0.5), (0.5, 0.5), 0.0)
+    Hi = np.linalg.inv(H)
+    return Hi.T @ C0 @ Hi
+
+
 class RectSurface:
+    """Rectangle, éventuellement aux coins arrondis. Les 4 coins sont ceux du
+    rectangle « pointu » (là où les bords droits se rejoindraient)."""
     kind = "rect"
 
-    def __init__(self, corners):
+    def __init__(self, corners, roundness=0.0):
         self.corners = np.asarray(corners, np.float64).reshape(4, 2)
+        self.roundness = float(roundness)
 
     def track_polygon(self):
-        return self.corners
+        return rounded_outline(self.corners, self.roundness)
 
     def reference_corners(self, focal, width, height, homographies=None):
         """4 coins d'un vrai rectangle sur l'image de référence (+ proportions inconnues : None)."""
@@ -122,10 +154,20 @@ class RectSurface:
 class DiscSurface:
     kind = "disc"
 
-    def __init__(self, rim_points):
-        self.rim_points = np.asarray(rim_points, np.float64).reshape(-1, 2)
-        self.center, self.axes, self.angle = fit_ellipse(self.rim_points)
-        self.conic = ellipse_conic(self.center, self.axes, self.angle)
+    def __init__(self, rim_points=None, conic=None):
+        if conic is None:
+            self.rim_points = np.asarray(rim_points, np.float64).reshape(-1, 2)
+            self.center, self.axes, self.angle = fit_ellipse(self.rim_points)
+            self.conic = ellipse_conic(self.center, self.axes, self.angle)
+        else:  # ellipse déjà connue (ex. rectangle arrondi à fond)
+            from .ellipse_track import _ellipse_points
+            self.conic = np.asarray(conic, np.float64)
+            self.center, self.axes, self.angle = fit_ellipse(_ellipse_points(self.conic, 72))
+
+    @classmethod
+    def from_square(cls, corners):
+        """Disque inscrit dans le carré (vu en perspective) dont on donne les 4 coins."""
+        return cls(conic=inscribed_conic(corners))
 
     def track_polygon(self):
         return ellipse_polygon(self.center, self.axes, self.angle, scale=1.0)

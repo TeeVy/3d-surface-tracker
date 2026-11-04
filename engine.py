@@ -68,7 +68,13 @@ def cmd_track(a):
         raise ValueError("Un rectangle se désigne par exactement 4 coins.")
     if a.surface == "disc" and len(pts) < 5:
         raise ValueError("Il faut au moins 5 points sur le bord du disque.")
-    surface = {"rect": RectSurface, "disc": DiscSurface, "free": FreeSurface}[a.surface](pts)
+    if a.surface == "rect" and a.roundness >= 0.999:
+        surface = DiscSurface.from_square(pts)      # rectangle arrondi à fond = disque
+    elif a.surface == "rect":
+        surface = RectSurface(pts, a.roundness)
+    else:
+        surface = {"disc": DiscSurface, "free": FreeSurface}[a.surface](pts)
+    normal = [float(v) for v in a.normal.split(",")] if a.normal else None
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -104,7 +110,7 @@ def cmd_track(a):
     frame_range = (a.start, a.end) if a.start is not None and a.end is not None else None
     res = run(a.video, surface, a.ref_frame, focal_mm=a.focal_mm, smooth=a.smooth, flip=False,
               log=lambda m: emit(type="log", msg=m), progress=progress, frame_range=frame_range,
-              should_stop=stop.is_set, live=live, mode=a.mode)
+              should_stop=stop.is_set, live=live, mode=a.mode, normal_hint=normal)
 
     name = a.name or Path(a.video).stem
     jsx = out / "apply.jsx"
@@ -146,6 +152,8 @@ def main():
     p.add_argument("--points", required=True)
     p.add_argument("--ref-frame", type=int, default=0)
     p.add_argument("--mode", choices=["auto", "object", "camera"], default="auto")
+    p.add_argument("--roundness", type=float, default=0.0, help="rect : arrondi des coins 0..1 (1 = disque)")
+    p.add_argument("--normal", help="orientation choisie : normale du plan « x,y,z » (repère caméra)")
     p.add_argument("--start", type=int, help="première image du fichier à tracker")
     p.add_argument("--end", type=int, help="dernière image du fichier à tracker (incluse)")
     p.add_argument("--focal-mm", type=float)

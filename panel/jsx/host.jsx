@@ -55,7 +55,19 @@ function stGetSelection() {
     var comp = app.project.activeItem;
     if (!(comp instanceof CompItem)) return stFail("Ouvrez la composition et sélectionnez le calque vidéo à tracker.");
     if (comp.selectedLayers.length === 0) return stFail("Sélectionnez le calque vidéo à tracker dans la composition.");
-    var L = comp.selectedLayers[0];
+    return stDescribe(comp, comp.selectedLayers[0], comp.time);
+}
+
+// Calque désigné par le script « Tracker le calque » (compo, indice, instant au lancement).
+function stGetLayer(compId, layerIndex, time) {
+    var comp = stFindComp(compId);
+    if (!comp) return stFail("La composition du calque à tracker est introuvable.");
+    if (layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Le calque à tracker est introuvable.");
+    return stDescribe(comp, comp.layer(layerIndex), time);
+}
+
+function stDescribe(comp, sel, time) {
+    var L = sel;
     var warnings = [], chain = [];
     var offset = 0;                         // temps compo = offset + temps dans le fichier
     var Ax = 1, Ay = 1, Bx = 0, By = 0;     // pixel compo = A * pixel du calque courant + B
@@ -105,7 +117,7 @@ function stGetSelection() {
     var first = Math.max(0, Math.ceil(lo * fps - 1e-6));
     var last = Math.min(srcFrames - 1, Math.ceil(hi * fps - 1e-6) - 1);
     if (last < first) return stFail("Le calque n'est visible sur aucune image de la composition.");
-    var frame = Math.round((comp.time - offset) * fps);
+    var frame = Math.round((time - offset) * fps);
     if (frame < first || frame > last) {
         warnings.push("L'instant courant est hors de la partie visible du calque : l'image de référence est ramenée à " +
                       (frame < first ? "sa première" : "sa dernière") + " image.");
@@ -113,7 +125,7 @@ function stGetSelection() {
     }
     return stJSON({
         ok: true, compId: comp.id, compName: comp.name, compW: comp.width, compH: comp.height,
-        layerIndex: comp.selectedLayers[0].index, layerName: comp.selectedLayers[0].name,
+        layerIndex: sel.index, layerName: sel.name,
         footageName: L.name, chain: chain, file: src.file.fsName, fps: fps, timeOffset: offset,
         frame: frame, rangeStart: first, rangeEnd: last, srcFrames: srcFrames,
         duration: src.duration, warnings: warnings

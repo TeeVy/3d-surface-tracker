@@ -37,10 +37,12 @@ class Result:
 
 def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.0, aspect=None,
         smooth=None, flip=False, track_scale=None, log=print, progress=None, frame_range=None,
-        should_stop=None, live=None, mode="auto"):
+        should_stop=None, live=None, mode="auto", normal_hint=None):
     """frame_range=(début, fin) : images du fichier à traiter (incluses) ; ref_frame est
     un indice du fichier. live(indice, image réduite, H réduite, polygone réduit) est
-    appelé après chaque image trackée (aperçu en direct)."""
+    appelé après chaque image trackée (aperçu en direct). normal_hint : orientation
+    choisie dans le panneau (normale du plan, repère caméra de référence) ; elle
+    tranche l'ambiguïté d'un disque et s'impose pour une forme libre."""
     if smooth is None:  # disque : calage sur le bord, on peut lisser davantage l'inclinaison
         smooth = 4.0 if surface.kind == "disc" else 2.0
     W, H = video_size(video)
@@ -150,19 +152,35 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
             ok = p.valid & np.isfinite(moved).all(axis=1)
             sols.append((p, c))
             costs.append(float(np.median(np.linalg.norm(ctr[ok] - moved[ok], axis=1))))
-        best = int(np.argmin(costs)) ^ int(bool(flip))
+        ambiguous = max(costs) < 1.5 * min(costs) + 1.0  # trop proches pour trancher (faible perspective)
+        if normal_hint is not None:  # choix fait dans le panneau : la plus proche de l'orientation montrée
+            hint = np.asarray(normal_hint, float) / np.linalg.norm(normal_hint)
+            best = int(np.argmax([s[0].R[ref_frame][:, 2] @ hint for s in sols]))
+            evidence = int(np.argmin(costs))
+            if best != evidence and not ambiguous:
+                log("⚠ L'inclinaison choisie contredit nettement le mouvement observé : vérifiez l'aperçu.")
+            ambiguous = False
+        else:
+            best = int(np.argmin(costs)) ^ int(bool(flip))
         pose, corners = sols[best]
         log(f"Inclinaison du disque : interprétation {'B' if best else 'A'} "
             f"(écart des centres A {costs[0]:.2f} px / B {costs[1]:.2f} px)"
+            + (" — choisie dans le panneau" if normal_hint is not None else "")
             + (" — inversée à la demande" if flip else ""))
-        if max(costs) < 1.5 * min(costs) + 1.0:  # trop proches pour trancher (faible perspective)
+        if ambiguous:
             alternative = sols[1 - best]
             log("⚠ Inclinaison ambiguë (peu de perspective) : un second script avec l'inclinaison "
                 "inversée est aussi exporté.")
         ref_corners = corners[ref_frame]
     elif surface.kind == "free":
         normal, reliable, why = estimate_plane_normal(track.homographies, focal, W, H, ref_frame, surface.points)
-        if reliable:
+        if normal_hint is not None:
+            hint = np.asarray(normal_hint, float) / np.linalg.norm(normal_hint)
+            gap = np.degrees(np.arccos(np.clip(hint @ normal, -1, 1)))
+            log("Orientation de la forme : réglée dans le panneau"
+                + (f" (le mouvement suggère {why}, écart {gap:.0f}°)" if reliable else ""))
+            normal = hint
+        elif reliable:
             log(f"Orientation de la forme : {why}")
         else:
             normal = np.array([0.0, 0, 1])

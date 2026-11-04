@@ -6,36 +6,38 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+  <!-- Calque chargé (par le script « Tracker le calque » ou le bouton ↻) -->
   <header>
-    <h1>3D Surface Tracker</h1>
-    <span id="version">0.1</span>
+    <div id="shot" class="shot">
+      <div id="shot-empty" class="dim">Aucun calque — lancez « Tracker le calque » sur un calque vidéo.</div>
+      <div id="shot-info" class="hidden"></div>
+    </div>
+    <button id="btn-load" class="tool icon" title="Charger le calque sélectionné dans AE">
+      <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5"/></svg>
+    </button>
   </header>
+  <ul id="shot-warnings" class="warnings"></ul>
 
-  <!-- 1. Plan -->
-  <section id="s-shot">
-    <h2><span class="num">1</span> Plan</h2>
-    <button id="btn-load" class="primary wide">Charger le calque sélectionné</button>
-    <div id="shot-info" class="info hidden"></div>
-    <ul id="shot-warnings" class="warnings"></ul>
-  </section>
-
-  <!-- 2. Surface -->
+  <!-- Surface -->
   <section id="s-surface" class="disabled">
-    <h2><span class="num">2</span> Surface</h2>
     <div class="toolbar" id="toolbar">
-      <button data-tool="rect" class="tool on" title="Rectangle : cliquez ses 4 coins (écran, étiquette, boîte…)">
-        <svg viewBox="0 0 24 24"><path d="M4 7l15-2 1 12-16 2z"/></svg><span>Rectangle</span>
-      </button>
-      <button data-tool="disc" class="tool" title="Disque : cliquez des points sur son bord (couvercle, tête ronde…)">
-        <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="9" ry="6.5" transform="rotate(-15 12 12)"/></svg><span>Disque</span>
-      </button>
-      <button data-tool="free" class="tool" title="Forme libre : cliquez le contour d'une zone plane, son orientation est déduite du mouvement">
-        <svg viewBox="0 0 24 24"><path d="M5 17l2-10 6 3 6-5-1 9-5 4z"/></svg><span>Forme libre</span>
+      <div class="seg">
+        <button data-tool="rect" class="tool icon on" title="Rectangle : 4 coins (arrondissez pour un disque)">
+          <svg viewBox="0 0 24 24"><path d="M4 7l15-2 1 12-16 2z"/></svg>
+        </button>
+        <button data-tool="free" class="tool icon" title="Forme libre : contour d'une zone plane, point par point">
+          <svg viewBox="0 0 24 24"><path d="M5 17l2-10 6 3 6-5-1 9-5 4z"/></svg>
+        </button>
+      </div>
+      <label id="round-wrap" class="inline grow" title="Arrondi des coins — à fond : disque">
+        <svg class="ico" viewBox="0 0 24 24"><path d="M5 19V11a6 6 0 0 1 6-6h8"/></svg>
+        <input id="in-round" type="range" min="0" max="100" step="1" value="0">
+        <span id="round-val" class="mono">0 %</span>
+      </label>
+      <button id="btn-flip" class="tool icon hidden" title="Inverser l'inclinaison du disque (flèche bleue)">
+        <svg viewBox="0 0 24 24"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg>
       </button>
       <span class="grow"></span>
-      <button id="btn-fit" class="tool icon" title="Recadrer la vue (double-clic)">
-        <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
-      </button>
       <button id="btn-clear" class="tool icon" title="Effacer les points">
         <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/></svg>
       </button>
@@ -43,66 +45,48 @@
     <div id="canvas-wrap">
       <canvas id="view"></canvas>
       <div id="live-badge" class="live-badge hidden"></div>
-      <div id="canvas-empty">Chargez un calque pour afficher l'image de référence.</div>
+      <div id="canvas-empty">L'image du calque s'affichera ici.</div>
     </div>
-    <div class="row hint-row">
-      <span id="hint" class="hint"></span>
-      <button id="btn-edit" class="small hidden" title="Revenir aux points de la surface">Retoucher</button>
+    <div id="hint" class="hint"></div>
+    <!-- Forme libre : orientation réglable à la main -->
+    <div id="orient-wrap" class="orient hidden">
+      <label class="inline grow">Inclinaison
+        <input id="in-tilt" type="range" min="0" max="80" step="1" value="0"><span id="tilt-val" class="mono">0°</span>
+      </label>
+      <label class="inline grow">Direction
+        <input id="in-dir" type="range" min="0" max="359" step="1" value="0"><span id="dir-val" class="mono">0°</span>
+      </label>
+      <button id="btn-orient-auto" class="small" title="Laisser le mouvement décider de l'orientation">Auto</button>
     </div>
-    <details id="advanced">
-      <summary>Réglages avancés</summary>
-      <div class="row tight">
-        <label class="grow">Première image <input id="in-start" type="number" min="0" step="1"></label>
-        <label class="grow">Dernière image <input id="in-end" type="number" min="0" step="1"></label>
-        <button id="btn-range-reset" class="small" title="Revenir à la partie visible du calque">↺</button>
-      </div>
-      <div class="note">Par défaut : la partie du rush visible dans la compo.</div>
-      <label>Mouvement
-        <select id="in-mode">
-          <option value="auto">Automatique (détecté)</option>
-          <option value="object">L'objet bouge, la caméra est fixe</option>
-          <option value="camera">La caméra bouge, la surface est fixe</option>
-        </select>
-      </label>
-      <div class="note">Ne change rien au contenu collé sur la surface ; détermine ce qui est animé dans AE
-        (utile si vous ajoutez d'autres éléments 3D à la scène).</div>
-      <label>Focale (mm, équivalent plein format)
-        <input id="in-focal" type="number" min="5" max="1200" step="0.1" placeholder="auto">
-      </label>
-      <div id="focal-note" class="note"></div>
-      <label>Stabilisation de l'inclinaison <span id="smooth-val">auto</span>
-        <input id="in-smooth" type="range" min="-1" max="10" step="1" value="-1">
-      </label>
-      <div class="note">Plus fort = plus stable, mais léger retard sur les rotations rapides.</div>
-    </details>
+    <!-- Focale : seulement si la vidéo n'a pas de métadonnées -->
+    <div id="focal-wrap" class="focal hidden">
+      <span class="warn-text">Focale inconnue</span>
+      <input id="in-focal" type="number" min="5" max="1200" step="0.1" placeholder="mm (éq. 24x36)">
+      <span class="dim">sinon 50 mm</span>
+    </div>
   </section>
 
-  <!-- 3. Tracking -->
+  <!-- Tracking + résultat -->
   <section id="s-track" class="disabled">
-    <h2><span class="num">3</span> Tracking</h2>
-    <div class="row">
-      <button id="btn-track" class="primary grow">Tracker</button>
-      <button id="btn-stop" class="hidden grow" title="Arrête le suivi et garde les images déjà trackées">■ Arrêter et garder</button>
+    <div class="row track-row">
+      <button id="btn-track" class="primary">Tracker</button>
+      <button id="btn-stop" class="hidden" title="Arrête le suivi et garde les images déjà trackées">■ Arrêter</button>
+      <button id="btn-play" class="tool icon" title="Lecture / pause de l'aperçu" disabled>▶</button>
+      <div class="scrub-wrap grow">
+        <input id="scrub" type="range" min="0" max="0" value="0" disabled>
+        <div id="progress" class="hidden"><div id="progress-bar"></div></div>
+      </div>
+      <span id="frame-label" class="mono">—</span>
     </div>
-    <div id="progress" class="hidden"><div id="progress-bar"></div><span id="progress-label"></span></div>
-    <details id="log-box"><summary>Journal</summary><pre id="log"></pre></details>
-  </section>
-
-  <!-- 4. Résultat -->
-  <section id="s-result" class="disabled">
-    <h2><span class="num">4</span> Résultat</h2>
     <ul id="summary" class="summary"></ul>
-    <div class="row">
-      <button id="btn-play" class="small" title="Lecture / pause">▶</button>
-      <input id="scrub" type="range" min="0" max="0" value="0" class="grow">
-      <span id="frame-label" class="mono">0</span>
-    </div>
-    <div class="row">
-      <label class="check"><input id="chk-sync" type="checkbox" checked> Synchroniser l'instant d'AE</label>
+    <div id="result-actions" class="row hidden">
+      <button id="btn-edit" class="small" title="Revenir aux points de la surface">Retoucher</button>
       <label class="check hidden" id="flip-wrap"><input id="chk-flip" type="checkbox"> Inclinaison inversée</label>
+      <span class="grow"></span>
+      <button id="btn-apply" class="primary">Appliquer dans AE</button>
     </div>
-    <button id="btn-apply" class="primary wide">Appliquer dans After Effects</button>
     <div id="apply-msg" class="info hidden"></div>
+    <details id="log-box"><summary>Journal</summary><pre id="log"></pre></details>
   </section>
 
   <div id="toast" class="hidden"></div>
