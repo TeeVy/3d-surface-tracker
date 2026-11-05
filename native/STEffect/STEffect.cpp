@@ -97,6 +97,7 @@ PF_Err OpenTracker(PF_InData* in_data)
     std::string script = std::string(head) + R"JSX(
 (function () {
     var TITLE = "3D Surface Tracker";
+    var MENU = "3D Surface Tracker (panneau)";  // différent du nom de l'effet, sinon AE applique l'effet
     var comp = app.project.itemByID(ST_COMP);
     var dir = new Folder(Folder.userData.fsName + "/" + TITLE);
     if (!dir.exists) dir.create();
@@ -114,7 +115,7 @@ PF_Err OpenTracker(PF_InData* in_data)
         alive.close();
     }
     if (!isOpen) {
-        var id = app.findMenuCommandId(TITLE);
+        var id = app.findMenuCommandId(MENU);
         if (id) app.executeCommand(id);
         else alert(TITLE + "\n\nOuvrez le panneau : Fenêtre > Extensions > " + TITLE + ".");
     }

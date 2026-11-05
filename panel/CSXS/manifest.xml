@@ -31,7 +31,7 @@
         </Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>3D Surface Tracker</Menu>
+          <Menu>3D Surface Tracker (panneau)</Menu>
           <Geometry>
             <Size><Height>860</Height><Width>460</Width></Size>
             <MinSize><Height>420</Height><Width>320</Width></MinSize>

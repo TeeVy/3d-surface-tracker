@@ -3,6 +3,7 @@
 // Le calque peut être une vidéo ou un précomp qui en contient une.
 (function () {
     var TITLE = "3D Surface Tracker";
+    var MENU = "3D Surface Tracker (panneau)";  // différent du nom de l'effet, sinon AE applique l'effet
     var comp = app.project.activeItem;
     if (!(comp instanceof CompItem) || comp.selectedLayers.length === 0) {
         alert(TITLE + "\n\nSélectionnez d'abord le calque à tracker dans une composition.");
@@ -35,7 +36,7 @@
         isOpen = (new Date().getTime() - t) < 3000;
     }
     if (!isOpen) {
-        var id = app.findMenuCommandId(TITLE);
+        var id = app.findMenuCommandId(MENU);
         if (id) app.executeCommand(id);
         else alert(TITLE + "\n\nOuvrez le panneau : Fenêtre > Extensions > " + TITLE + ".\nLe calque y sera chargé automatiquement.");
     }
