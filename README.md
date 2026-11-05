@@ -39,27 +39,36 @@ Le panneau suit **exactement les images que montre la compo** : précomps, remap
 étirement compris (une image figée ou un ralenti sont suivis tels quels). Les images clés sont
 posées sur les images de la compo.
 
+### Effet « 3D Surface Tracker » (recommandé)
+
+Appliquez l'effet *Effet > 3D Surface Tracker > 3D Surface Tracker* **tout en bas de la pile
+d'effets** du calque à tracker, puis cliquez son bouton **Ouvrir le tracker**. Le panneau suit
+l'image du calque **telle qu'elle arrive à l'effet** : une Stabilisation de déformation ou tout
+autre effet placé au-dessus est pris en compte, sans précomposer. L'effet ne modifie pas l'image.
+Les images sont calculées par After Effects et envoyées en mémoire par le pont (rien n'est rendu
+sur disque).
+
+### Sans l'effet
+
 **Seul le calque sélectionné compte**, comme avec le Camera Tracker d'AE ou Mocha :
 - un **métrage** est lu directement dans son fichier ;
-- un **précomp** est une boîte noire : After Effects calcule ses images (effets, stabilisation,
-  remappages internes compris) et les envoie au panneau en mémoire, par le **pont STBridge** ;
-- si le calque a lui-même des **effets**, le panneau refuse : précomposez-le (*Calque >
-  Pré-composer*, « Déplacer tous les attributs ») puis trackez le précomp.
+- un **précomp** est une boîte noire : After Effects calcule ses images et les envoie par le pont ;
+- un calque avec des **effets** est refusé : ajoutez-lui l'effet tracker en bas de la pile, ou
+  précomposez-le.
 
-La focale est lue dans le rush le plus bas du précomp quand il y en a un.
+La focale est lue dans le rush du calque (ou le plus bas du précomp) quand il y en a un.
 
-### Pont After Effects (plug-in natif, une seule fois)
+### Plug-ins natifs (une fois)
 
-Le plug-in `STBridge` (code dans `native/STBridge/`) est déjà compilé dans `out/native/`. Pour
-l'installer dans chaque version d'After Effects (mot de passe administrateur demandé), puis
-redémarrer AE :
+`native/` contient le pont `STBridge` et l'effet `STEffect`. Pour les compiler et les installer
+dans chaque version d'After Effects (mot de passe administrateur demandé), puis redémarrer AE :
 
 ```bash
-native/STBridge/build.sh --install
+native/build.sh --install
 ```
 
-Il recompile au passage (SDK attendu dans `AfterEffectsSDK/`). Sans le pont, un précomp est rendu
-sur disque par la file d'attente de rendu, ce qui est bien plus lent.
+Le SDK d'After Effects est attendu dans `AfterEffectsSDK/` (non versionné). Sans le pont, un
+précomp est rendu sur disque par la file d'attente de rendu, ce qui est bien plus lent.
 
 1. **Image de référence** : à l'ouverture, une seule lecture du plan charge les images en mémoire et
    prépare les vignettes de la timeline (bande grise). Cliquez ou glissez dans la timeline, ou

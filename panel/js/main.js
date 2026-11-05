@@ -282,7 +282,8 @@
 
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
-    const what = sel.mode === 'file' ? path.basename(sel.file) : `précomp « ${escapeHtml(sel.footageName)} »`;
+    const what = sel.mode === 'file' ? path.basename(sel.file)
+      : sel.mode === 'layer' ? `avant l'effet tracker (n° ${sel.effectIndex})` : `précomp « ${escapeHtml(sel.footageName)} »`;
     $('shot-info').innerHTML =
       `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · ${sel.mode === 'file' ? escapeHtml(what) : what}</div>` +
       `<div class="line dim">Images ${sel.seqStart}–${sel.seqStart + state.n - 1} de « ${escapeHtml(sel.compName)} » ` +
@@ -301,11 +302,15 @@
       fs.mkdirSync(state.workDir, { recursive: true });
       const seq = path.join(state.workDir, 'seq.json');
       let video = sel.file, spec = { src: sel.frames, fps: sel.compFps, start: sel.seqStart, first: sel.cur };
-      if (sel.mode === 'bridge') {
+      if (sel.mode === 'bridge' || sel.mode === 'layer') {
         const lens = { lens_src: sel.lensFile || null, lens_frames: sel.lensFrames || null, focal_scale: sel.focalScale || 1 };
-        if (await bridgeAvailable()) {  // AE calcule les images du précomp, en mémoire
+        if (await bridgeAvailable()) {  // AE calcule les images, en mémoire
           video = 'bridge';
-          spec = Object.assign(spec, lens, { bridge: { item: sel.item, times: sel.times, width: sel.itemW, height: sel.itemH } });
+          const bridge = { item: sel.item, times: sel.times, width: sel.itemW, height: sel.itemH };
+          if (sel.mode === 'layer') bridge.layer = { comp: sel.compId, layer: sel.layerIndex, effect: sel.effectIndex, time: 'L' };
+          spec = Object.assign(spec, lens, { bridge });
+        } else if (sel.mode === 'layer') {
+          throw new Error('Pont After Effects absent : il faut le plug-in STBridge pour suivre un calque avec l\'effet « 3D Surface Tracker ». Voir le README.');
         } else {  // repli : rendu par la file d'attente
           note('Pont After Effects absent (plug-in STBridge non installé) : le précomp est rendu sur disque, c\'est plus lent. Voir le README pour l\'installer.');
           video = await renderLayer(sel);

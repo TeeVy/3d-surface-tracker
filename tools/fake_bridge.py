@@ -39,7 +39,10 @@ def serve(c):
         if parts[0] == "PING":
             c.sendall(b"OK STBridge 1\n")
             continue
-        _, item, tv, ts, ds, mode = parts
+        if parts[0] == "RENDERL":  # calque avant l'effet : même vidéo, temps compo
+            _, comp, layer, eff, tv, ts, ds, mode = parts[:8]
+        else:
+            _, item, tv, ts, ds, mode = parts
         t = int(tv) / int(ts)
         with lock:
             img = read_frame_bgr(a.video, int(t * fps + 1e-4))

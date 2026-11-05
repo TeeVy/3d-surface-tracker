@@ -101,13 +101,20 @@ function stDescribe(comp, sel, time) {
     if (!(sel instanceof AVLayer) || !sel.source) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
     var src = sel.source, isComp = src instanceof CompItem;
     if (!isComp && !stIsVideoFootage(src)) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
-    var fx = stActiveEffects(sel);
-    if (fx.length) {
-        return stFail("Le calque « " + sel.name + " » a des effets (" + fx.join(", ") + ") : le tracking ne les voit pas.\n\n" +
-                      "Précomposez-le (Calque > Pré-composer, « Déplacer tous les attributs dans la nouvelle composition »), " +
-                      "puis trackez le précomp.");
-    }
     var warnings = [];
+    // Effet « 3D Surface Tracker » sur le calque : on suit l'image telle qu'elle lui arrive
+    // (effets placés au-dessus compris). Sinon, le calque ne doit pas avoir d'effets.
+    var stFx = stTrackerEffect(sel);
+    var fx = stActiveEffects(sel);
+    if (stFx) {
+        var below = [], par = sel.property("ADBE Effect Parade");
+        for (var e = stFx + 1; e <= par.numProperties; e++) if (par.property(e).active) below.push(par.property(e).name);
+        if (below.length) warnings.push("Effets placés sous « 3D Surface Tracker » (" + below.join(", ") + ") : le tracking ne les voit pas. Mettez le tracker en bas de la pile.");
+    } else if (fx.length) {
+        return stFail("Le calque « " + sel.name + " » a des effets (" + fx.join(", ") + ") : le tracking ne les voit pas.\n\n" +
+                      "Ajoutez l'effet « 3D Surface Tracker » tout en bas de sa pile d'effets (il voit alors l'image avec ces effets), " +
+                      "ou précomposez le calque.");
+    }
     var tr = sel.property("ADBE Transform Group");
     var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
     var sc = tr.property("ADBE Scale").value, rot = tr.property("ADBE Rotate Z").value;
@@ -154,6 +161,23 @@ function stDescribe(comp, sel, time) {
         compFps: 1 / fd, layerIndex: sel.index, layerName: sel.name, seqStart: seqStart, cur: cur,
         retimed: retimed, warnings: warnings, chain: [sel.name]
     };
+    if (stFx) {  // calque juste avant l'effet tracker, calculé par AE (pont)
+        out.mode = "layer";
+        out.effectIndex = stFx;
+        out.itemW = src.width; out.itemH = src.height;
+        out.footageName = src.name;
+        var ctimes = [], ltimes = [];
+        for (var c = 0; c < keys.length; c++) ctimes.push((seqStart + c) * fd);
+        out.times = ctimes; out.frames = [];
+        for (var c2 = 0; c2 < keys.length; c2++) out.frames.push(c2);
+        if (isComp) {
+            var lensC = stLensInside(src, keys);
+            if (lensC) { out.lensFile = lensC.file; out.lensFrames = lensC.frames; out.focalScale = lensC.scale; }
+        } else {
+            out.lensFile = src.file.fsName; out.lensFrames = keys; out.focalScale = 1;
+        }
+        return stJSON(out);
+    }
     if (!isComp) {  // métrage : lu directement dans le fichier
         out.mode = "file";
         out.file = src.file.fsName; out.footageName = src.name; out.fps = fps;
@@ -176,6 +200,16 @@ function stDescribe(comp, sel, time) {
     var lens = stLensInside(src, times);
     if (lens) { out.lensFile = lens.file; out.lensFrames = lens.frames; out.focalScale = lens.scale; out.file = lens.file; }
     return stJSON(out);
+}
+
+// Indice (1..n) de l'effet « 3D Surface Tracker » actif sur le calque, ou 0.
+function stTrackerEffect(L) {
+    var par = L.property("ADBE Effect Parade");
+    if (!par) return 0;
+    for (var i = 1; i <= par.numProperties; i++) {
+        if (par.property(i).matchName === "SurfTrack 3D Surface Tracker" && par.property(i).active) return i;
+    }
+    return 0;
 }
 
 // Rush le plus bas d'un précomp (en descendant les précomps imbriqués) : fichier, image du

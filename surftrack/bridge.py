@@ -57,6 +57,19 @@ class Bridge:
             fr = Fraction(round(float(t) * 1000), 1000)
         self.s.sendall(f"RENDER {int(item)} {fr.numerator} {fr.denominator} {int(downsample)} "
                        f"{'C' if color else 'G'}\n".encode())
+        return self._read_image()
+
+    def render_layer(self, comp, layer, effect, t, downsample=1, color=True, layer_time=True):
+        """Image du calque n° layer de la compo `comp`, juste avant son effet n° effect (numéros
+        ExtendScript), à l'instant t de la compo."""
+        fr = Fraction(t).limit_denominator(1_000_000)
+        if fr.numerator > 2**31 - 1:
+            fr = Fraction(round(float(t) * 1000), 1000)
+        self.s.sendall(f"RENDERL {int(comp)} {int(layer)} {int(effect)} {fr.numerator} {fr.denominator} "
+                       f"{int(downsample)} {'C' if color else 'G'} {'L' if layer_time else 'C'}\n".encode())
+        return self._read_image()
+
+    def _read_image(self):
         head = self._line()
         if not head.startswith("OK"):
             raise BridgeError("After Effects : " + head[4:])

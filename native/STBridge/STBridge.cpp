@@ -8,8 +8,12 @@
         ~/Library/Application Support/3D Surface Tracker/bridge.sock
     Chaque requête est une ligne de texte :
         PING
-            -> "OK STBridge 1\n"
+            -> "OK STBridge 2\n"
         RENDER <id élément> <temps (valeur)> <temps (échelle)> <sous-échantillonnage> <G|C>
+        RENDERL <id compo> <n° calque> <n° effet> <temps compo (valeur)> <(échelle)> <sous-éch.> <G|C> [L|C]
+            image du calque juste AVANT l'effet indiqué (effets au-dessus compris, numéros
+            comptés à partir de 1 comme en ExtendScript) ; L : le temps compo est converti en
+            temps du calque (par défaut), C : passé tel quel
             -> "OK <largeur> <hauteur> <canaux>\n" puis les pixels (1 octet par canal,
                lignes contiguës ; G : niveaux de gris, C : bleu-vert-rouge)
             -> "ERR <message>\n"
@@ -51,6 +55,9 @@ SPBasicSuite* S_sp = nullptr;
 A_Err (*S_wake)(void) = nullptr;  // AEGP_CauseIdleRoutinesToBeCalled : appelable depuis n'importe quel fil
 
 struct Request {
+    bool layer = false;     // RENDERL : calque avant un effet
+    A_long layer_index = 0, effect_index = 0;
+    bool layer_time = true;
     A_long item = 0;
     A_long tvalue = 0;
     A_u_long tscale = 1;
@@ -100,8 +107,75 @@ AEGP_ItemH FindItem(AEGP_SuiteHandler& suites, A_long wanted)
     return nullptr;
 }
 
+// Copie les pixels d'une image rendue (ARGB 8 bits) dans la réponse : gris ou BGR.
+void Grab(AEGP_SuiteHandler& suites, AEGP_FrameReceiptH receiptH, Request& r)
+{
+    A_Err err = A_Err_NONE;
+    AEGP_WorldH worldH = nullptr;
+    ERR(suites.RenderSuite5()->AEGP_GetReceiptWorld(receiptH, &worldH));
+    A_long w = 0, h = 0;
+    A_u_long rowbytes = 0;
+    PF_Pixel8* base = nullptr;
+    ERR(suites.WorldSuite3()->AEGP_GetSize(worldH, &w, &h));
+    ERR(suites.WorldSuite3()->AEGP_GetRowBytes(worldH, &rowbytes));
+    ERR(suites.WorldSuite3()->AEGP_GetBaseAddr8(worldH, &base));
+    if (err || !base || w <= 0 || h <= 0) { r.error = "image rendue illisible"; return; }
+    const int ch = r.color ? 3 : 1;
+    r.w = w;
+    r.h = h;
+    r.pixels.resize(static_cast<size_t>(w) * h * ch);
+    unsigned char* out = r.pixels.data();
+    for (A_long y = 0; y < h; y++) {
+        const PF_Pixel8* p = reinterpret_cast<const PF_Pixel8*>(reinterpret_cast<const char*>(base) + y * rowbytes);
+        if (r.color) {
+            for (A_long x = 0; x < w; x++, out += 3) { out[0] = p[x].blue; out[1] = p[x].green; out[2] = p[x].red; }
+        } else {
+            for (A_long x = 0; x < w; x++) *out++ = static_cast<unsigned char>((77 * p[x].red + 150 * p[x].green + 29 * p[x].blue) >> 8);
+        }
+    }
+}
+
+// Calque juste avant un effet donné, à un instant de la compo.
+void RenderLayer(AEGP_SuiteHandler& suites, Request& r)
+{
+    AEGP_ItemH itemH = FindItem(suites, r.item);
+    if (!itemH) { r.error = "composition introuvable"; return; }
+    A_Err err = A_Err_NONE, err2 = A_Err_NONE;
+    AEGP_CompH compH = nullptr;
+    AEGP_LayerH layerH = nullptr;
+    AEGP_EffectRefH effectH = nullptr;
+    AEGP_LayerRenderOptionsH lroH = nullptr;
+    if (suites.CompSuite11()->AEGP_GetCompFromItem(itemH, &compH) || !compH) { r.error = "ce n'est pas une composition"; return; }
+    if (suites.LayerSuite9()->AEGP_GetCompLayerByIndex(compH, r.layer_index - 1, &layerH) || !layerH) { r.error = "calque introuvable"; return; }
+    if (suites.EffectSuite4()->AEGP_GetLayerEffectByIndex(S_id, layerH, r.effect_index - 1, &effectH) || !effectH) {
+        r.error = "effet introuvable sur le calque";
+        return;
+    }
+    ERR(suites.LayerRenderOptionsSuite2()->AEGP_NewFromUpstreamOfEffect(S_id, effectH, &lroH));
+    A_Time ct = {r.tvalue, r.tscale}, t = ct;
+    if (!err && r.layer_time) ERR(suites.LayerSuite9()->AEGP_ConvertCompToLayerTime(layerH, &ct, &t));
+    if (!err && lroH) {
+        ERR(suites.LayerRenderOptionsSuite2()->AEGP_SetTime(lroH, t));
+        ERR(suites.LayerRenderOptionsSuite2()->AEGP_SetWorldType(lroH, AEGP_WorldType_8));
+        ERR(suites.LayerRenderOptionsSuite2()->AEGP_SetDownsampleFactor(lroH, r.ds, r.ds));
+        AEGP_FrameReceiptH receiptH = nullptr;
+        if (!err) err = suites.RenderSuite5()->AEGP_RenderAndCheckoutLayerFrame(lroH, nullptr, nullptr, &receiptH);
+        if (!err && receiptH) {
+            Grab(suites, receiptH, r);
+            ERR2(suites.RenderSuite5()->AEGP_CheckinFrame(receiptH));
+        } else {
+            r.error = "rendu du calque refuse par After Effects (erreur " + std::to_string(err) + ")";
+        }
+    } else if (r.error.empty()) {
+        r.error = "options de rendu du calque impossibles";
+    }
+    if (lroH) ERR2(suites.LayerRenderOptionsSuite2()->AEGP_Dispose(lroH));
+    ERR2(suites.EffectSuite4()->AEGP_DisposeEffect(effectH));
+}
+
 void Render(AEGP_SuiteHandler& suites, Request& r)
 {
+    if (r.layer) { RenderLayer(suites, r); return; }
     AEGP_ItemH itemH = FindItem(suites, r.item);
     if (!itemH) { r.error = "element introuvable dans le projet"; return; }
     A_Err err = A_Err_NONE, err2 = A_Err_NONE;
@@ -118,31 +192,7 @@ void Render(AEGP_SuiteHandler& suites, Request& r)
     AEGP_FrameReceiptH receiptH = nullptr;
     if (!err) err = suites.RenderSuite5()->AEGP_RenderAndCheckoutFrame(roH, nullptr, nullptr, &receiptH);
     if (!err && receiptH) {
-        AEGP_WorldH worldH = nullptr;
-        ERR(suites.RenderSuite5()->AEGP_GetReceiptWorld(receiptH, &worldH));
-        A_long w = 0, h = 0;
-        A_u_long rowbytes = 0;
-        PF_Pixel8* base = nullptr;
-        ERR(suites.WorldSuite3()->AEGP_GetSize(worldH, &w, &h));
-        ERR(suites.WorldSuite3()->AEGP_GetRowBytes(worldH, &rowbytes));
-        ERR(suites.WorldSuite3()->AEGP_GetBaseAddr8(worldH, &base));
-        if (!err && base && w > 0 && h > 0) {
-            const int ch = r.color ? 3 : 1;
-            r.w = w;
-            r.h = h;
-            r.pixels.resize(static_cast<size_t>(w) * h * ch);
-            unsigned char* out = r.pixels.data();
-            for (A_long y = 0; y < h; y++) {
-                const PF_Pixel8* p = reinterpret_cast<const PF_Pixel8*>(reinterpret_cast<const char*>(base) + y * rowbytes);
-                if (r.color) {
-                    for (A_long x = 0; x < w; x++, out += 3) { out[0] = p[x].blue; out[1] = p[x].green; out[2] = p[x].red; }
-                } else {
-                    for (A_long x = 0; x < w; x++) *out++ = static_cast<unsigned char>((77 * p[x].red + 150 * p[x].green + 29 * p[x].blue) >> 8);
-                }
-            }
-        } else if (!r.pixels.size()) {
-            r.error = "image rendue illisible";
-        }
+        Grab(suites, receiptH, r);
         ERR2(suites.RenderSuite5()->AEGP_CheckinFrame(receiptH));
     } else if (r.error.empty()) {
         r.error = "rendu refuse par After Effects (erreur " + std::to_string(err) + ")";
@@ -209,14 +259,25 @@ void Serve(int fd)
         std::string line = buf.substr(0, nl);
         buf.erase(0, nl + 1);
         if (line.rfind("PING", 0) == 0) {
-            if (!SendLine(fd, "OK STBridge 1\n")) break;
+            if (!SendLine(fd, "OK STBridge 2\n")) break;
             continue;
         }
         auto r = std::make_shared<Request>();
-        long item = 0, tv = 0, ds = 1;
+        long item = 0, tv = 0, ds = 1, li = 0, ei = 0;
         unsigned long ts = 1;
-        char mode = 'G';
-        if (std::sscanf(line.c_str(), "RENDER %ld %ld %lu %ld %c", &item, &tv, &ts, &ds, &mode) < 4 || ts == 0 || ds < 1) {
+        char mode = 'G', tmode = 'L';
+        bool ok;
+        if (line.rfind("RENDERL", 0) == 0) {
+            ok = std::sscanf(line.c_str(), "RENDERL %ld %ld %ld %ld %lu %ld %c %c", &item, &li, &ei, &tv, &ts, &ds, &mode, &tmode) >= 6
+                 && li >= 1 && ei >= 1;
+            r->layer = true;
+            r->layer_index = static_cast<A_long>(li);
+            r->effect_index = static_cast<A_long>(ei);
+            r->layer_time = (tmode != 'C');
+        } else {
+            ok = std::sscanf(line.c_str(), "RENDER %ld %ld %lu %ld %c", &item, &tv, &ts, &ds, &mode) >= 4;
+        }
+        if (!ok || ts == 0 || ds < 1) {
             if (!SendLine(fd, "ERR requete invalide\n")) break;
             continue;
         }

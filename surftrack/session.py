@@ -110,9 +110,18 @@ class Session:
         ds = int(round(1 / self.scale))
         try:
             for s in order:
-                yield s, br.render(self.bridge["item"], self.bridge["times"][s], ds, color=True)
+                yield s, self._render(br, s, ds)
         finally:
             br.close()
+
+    def _render(self, br, s, ds):
+        """Image s calculée par AE : précomp (élément) ou calque juste avant l'effet tracker."""
+        b = self.bridge
+        if b.get("layer"):
+            L = b["layer"]
+            return br.render_layer(L["comp"], L["layer"], L["effect"], b["times"][s], ds, color=True,
+                                   layer_time=L.get("time", "L") == "L")
+        return br.render(b["item"], b["times"][s], ds, color=True)
 
     def load_all(self):
         """Une passe : images de tracking en mémoire + vignettes sur disque."""
@@ -170,7 +179,7 @@ class Session:
                 from .bridge import Bridge
                 br = Bridge()
                 try:
-                    img = br.render(self.bridge["item"], self.bridge["times"][s], 1, color=True)
+                    img = self._render(br, s, 1)
                 finally:
                     br.close()
             else:
