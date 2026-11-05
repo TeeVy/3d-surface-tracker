@@ -94,80 +94,113 @@ function stActiveEffects(L) {
     return out;
 }
 
+// Calque à tracker : SEUL le calque sélectionné compte. Un précomp est une boîte noire
+// dont After Effects calcule l'image (pont STBridge) ; un métrage est lu directement.
+// Les effets du calque lui-même ne seraient pas pris en compte : on demande de précomposer.
 function stDescribe(comp, sel, time) {
-    var L = sel;
-    var warnings = [], names = [], chain = [], effects = [];
-    var Ax = 1, Ay = 1, Bx = 0, By = 0;     // pixel compo = A * pixel du calque courant + B
-    var retimed = false;
-
-    for (var depth = 0; depth < 12; depth++) {
-        if (!(L instanceof AVLayer) || !L.source) return stFail("Le calque « " + L.name + " » n'est ni une vidéo ni un précomp.");
-        chain.push(L);
-        names.push(L.name);
-        var fxs = stActiveEffects(L);
-        for (var fi = 0; fi < fxs.length; fi++) effects.push(fxs[fi] + " (" + L.name + ")");
-        if (L.timeRemapEnabled || !stNear(L.stretch, 100, 0.01)) retimed = true;
-        var tr = L.property("ADBE Transform Group");
-        var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
-        var sc = tr.property("ADBE Scale").value, rot = tr.property("ADBE Rotate Z").value;
-        if (L.threeDLayer || !stNear(rot, 0, 0.01) || L.parent) {
-            warnings.push("« " + L.name + " » est en 3D, tourné ou parenté : la surface ne sera pas calée correctement.");
-        }
-        Bx = Ax * (pos[0] - sc[0] / 100 * anc[0]) + Bx;
-        By = Ay * (pos[1] - sc[1] / 100 * anc[1]) + By;
-        Ax *= sc[0] / 100;
-        Ay *= sc[1] / 100;
-        if (stIsVideoFootage(L.source)) break;
-        if (!(L.source instanceof CompItem)) return stFail("Le calque « " + L.name + " » n'est pas une vidéo.");
-        var inner = stPickInner(L.source, warnings);
-        if (!inner) return stFail("Le précomp « " + L.source.name + " » ne contient aucun calque vidéo actif.");
-        L = inner;
+    if (!(sel instanceof AVLayer) || !sel.source) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
+    var src = sel.source, isComp = src instanceof CompItem;
+    if (!isComp && !stIsVideoFootage(src)) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
+    var fx = stActiveEffects(sel);
+    if (fx.length) {
+        return stFail("Le calque « " + sel.name + " » a des effets (" + fx.join(", ") + ") : le tracking ne les voit pas.\n\n" +
+                      "Précomposez-le (Calque > Pré-composer, « Déplacer tous les attributs dans la nouvelle composition »), " +
+                      "puis trackez le précomp.");
     }
-    var src = L.source;
-    if (!stIsVideoFootage(src)) return stFail("Aucune vidéo trouvée sous le calque sélectionné (trop de niveaux de précomp ?).");
-
-    // Si des effets (stabilisation…) ou un recadrage changent l'image entre le fichier et la
-    // compo, on ne peut pas suivre le fichier : AE rendra le calque tel que la compo le montre.
+    var warnings = [];
+    var tr = sel.property("ADBE Transform Group");
+    var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
+    var sc = tr.property("ADBE Scale").value, rot = tr.property("ADBE Rotate Z").value;
+    if (sel.threeDLayer || !stNear(rot, 0, 0.01) || sel.parent) {
+        warnings.push("« " + sel.name + " » est en 3D, tourné ou parenté : la surface ne sera pas calée correctement.");
+    }
     var k = comp.width / src.width;
-    var moved = !stNear(Ax, k, 0.002 * k) || !stNear(Ay, k, 0.002 * k) || !stNear(Bx, 0, 1) || !stNear(By, 0, 1);
-    var render = moved || effects.length > 0;
-    var renderWhy = effects.length ? "effets : " + effects.join(", ") : moved ? "vidéo déplacée ou recadrée dans la compo" : "";
-    if (moved) {
-        warnings.push("La vidéo est déplacée ou recadrée dans la compo : le suivi est juste, mais l'axe optique " +
-                      "n'est plus au centre de l'image, la 3D peut être légèrement faussée.");
+    var Ax = sc[0] / 100, Ay = sc[1] / 100, Bx = pos[0] - Ax * anc[0], By = pos[1] - Ay * anc[1];
+    if (!stNear(Ax, k, 0.002 * k) || !stNear(Ay, k, 0.002 * k) || !stNear(Bx, 0, 1) || !stNear(By, 0, 1)) {
+        warnings.push("Le calque est déplacé ou mis à l'échelle dans la compo : la surface 3D sera décalée. " +
+                      "Il doit remplir la compo tel quel (précomposez-le si besoin).");
     }
+    var retimed = sel.timeRemapEnabled || !stNear(sel.stretch, 100, 0.01);
 
-    // Image du fichier montrée à chaque image de la compo où le calque est visible :
-    // le suivi porte exactement sur ce qu'affiche la compo, remappages compris.
-    var fps = src.frameRate, fd = comp.frameDuration;
-    var srcFrames = Math.round(src.duration * fps);
+    // Image de la source montrée à chaque image de la compo où le calque est visible
+    // (remappage et étirement du calque compris).
+    var fd = comp.frameDuration, fps = isComp ? 1 / src.frameDuration : src.frameRate;
+    var srcFrames = isComp ? 0 : Math.round(src.duration * fps);
     var j0 = Math.max(0, Math.ceil(sel.inPoint / fd - 1e-4));
     var j1 = Math.min(Math.round(comp.duration / fd), Math.ceil(sel.outPoint / fd - 1e-4)) - 1;
-    var frames = [];
-    for (var j = j0; j <= j1; j++) frames.push(stSourceFrame(chain, j * fd, fps, srcFrames));
-    var a = 0, b = frames.length - 1;
-    while (a <= b && frames[a] < 0) a++;
-    while (b >= a && frames[b] < 0) b--;
+    var keys = [];                          // métrage : image du fichier ; précomp : instant interne
+    for (var j = j0; j <= j1; j++) {
+        var t = stLayerTime(sel, j * fd);
+        if (t === null || t < -1e-6 || t >= src.duration - 1e-6) { keys.push(null); continue; }
+        if (isComp) keys.push(Math.max(0, t));
+        else { var f = Math.floor(t * fps + 1e-4); keys.push(f < srcFrames ? f : null); }
+    }
+    var a = 0, b = keys.length - 1;
+    while (a <= b && keys[a] === null) a++;
+    while (b >= a && keys[b] === null) b--;
     if (a > b) return stFail("Le calque n'est visible sur aucune image de la composition.");
-    frames = frames.slice(a, b + 1);
+    keys = keys.slice(a, b + 1);
     var seqStart = j0 + a;
-    for (var q = 1; q < frames.length; q++) if (frames[q] < 0) frames[q] = frames[q - 1];  // trou : image voisine
+    for (var q = 1; q < keys.length; q++) if (keys[q] === null) keys[q] = keys[q - 1];  // trou : image voisine
 
     var cur = Math.floor(time / fd + 1e-4) - seqStart;
-    if (cur < 0 || cur >= frames.length) {
+    if (cur < 0 || cur >= keys.length) {
         warnings.push("L'instant courant est hors de la partie visible du calque : la référence part de " +
                       (cur < 0 ? "sa première" : "sa dernière") + " image. Choisissez-la dans la timeline du panneau.");
-        cur = Math.min(frames.length - 1, Math.max(0, cur));
+        cur = Math.min(keys.length - 1, Math.max(0, cur));
     }
-    return stJSON({
+    var out = {
         ok: true, compId: comp.id, compName: comp.name, compW: comp.width, compH: comp.height,
-        compFps: 1 / fd, layerIndex: sel.index, layerName: sel.name,
-        footageName: L.name, chain: names, file: src.file.fsName, fps: fps, srcFrames: srcFrames,
-        seqStart: seqStart, frames: frames, cur: cur, retimed: retimed, warnings: warnings,
-        render: render, renderWhy: renderWhy,
-        // agrandissement du rush dans la compo, par rapport à une vidéo qui la remplit tout juste
-        focalScale: Ax * src.width / comp.width
-    });
+        compFps: 1 / fd, layerIndex: sel.index, layerName: sel.name, seqStart: seqStart, cur: cur,
+        retimed: retimed, warnings: warnings, chain: [sel.name]
+    };
+    if (!isComp) {  // métrage : lu directement dans le fichier
+        out.mode = "file";
+        out.file = src.file.fsName; out.footageName = src.name; out.fps = fps;
+        out.frames = keys;
+        return stJSON(out);
+    }
+
+    // Précomp : instants distincts (une image figée n'est calculée qu'une fois)
+    var times = [], index = {}, frames = [];
+    for (var u = 0; u < keys.length; u++) {
+        var key = String(Math.round(keys[u] * 1e5));
+        if (!index.hasOwnProperty(key)) { index[key] = times.length; times.push(keys[u]); }
+        frames.push(index[key]);
+    }
+    out.mode = "bridge";
+    out.item = src.id; out.itemW = src.width; out.itemH = src.height;
+    out.footageName = src.name; out.frames = frames; out.times = times;
+
+    // Focale : seulement lue dans le rush du précomp s'il y en a un (les pixels, eux, viennent d'AE)
+    var lens = stLensInside(src, times);
+    if (lens) { out.lensFile = lens.file; out.lensFrames = lens.frames; out.focalScale = lens.scale; out.file = lens.file; }
+    return stJSON(out);
+}
+
+// Rush le plus bas d'un précomp (en descendant les précomps imbriqués) : fichier, image du
+// fichier à chaque instant demandé, agrandissement dans le précomp. null si aucun.
+function stLensInside(comp, times) {
+    var chain = [], Ax = 1, L = null, c = comp, ignored = [];
+    for (var depth = 0; depth < 12; depth++) {
+        L = stPickInner(c, ignored);
+        if (!L) return null;
+        chain.push(L);
+        Ax *= L.property("ADBE Transform Group").property("ADBE Scale").value[0] / 100;
+        if (stIsVideoFootage(L.source)) break;
+        if (!(L.source instanceof CompItem)) return null;
+        c = L.source;
+    }
+    var src = L.source;
+    if (!stIsVideoFootage(src)) return null;
+    var fps = src.frameRate, n = Math.round(src.duration * fps), frames = [], last = 0;
+    for (var i = 0; i < times.length; i++) {
+        var f = stSourceFrame(chain, times[i], fps, n);
+        if (f < 0) f = last;
+        frames.push(f);
+        last = f;
+    }
+    return {file: src.file.fsName, frames: frames, scale: Ax * src.width / comp.width};
 }
 
 // Rend le calque tel que la compo le montre (effets compris), images seqStart à seqStart+n-1

@@ -1,5 +1,6 @@
 """Enchaînement complet : vidéo + surface -> tracking -> focale -> pose 3D."""
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -106,6 +107,8 @@ _LENS = {}
 
 def _lens(video):
     """Métadonnées d'objectif (lues une fois par fichier : ffprobe est lent)."""
+    if not video or not os.path.isfile(video):  # pas de rush identifié (précomp), ou rendu
+        return None
     if video not in _LENS:
         _LENS[video] = read_lens_info(video)
     return _LENS[video]

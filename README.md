@@ -39,11 +39,27 @@ Le panneau suit **exactement les images que montre la compo** : précomps, remap
 étirement compris (une image figée ou un ralenti sont suivis tels quels). Les images clés sont
 posées sur les images de la compo.
 
-Si un **effet** change l'image entre le fichier et la compo (Stabilisation de déformation, Transformer,
-correction d'objectif…), ou si la vidéo est déplacée ou recadrée, le panneau fait **rendre le calque
-par After Effects** à l'ouverture (le calque est mis en solo le temps du rendu, la file d'attente de
-rendu est laissée telle quelle) et suit ce rendu. Comptez le temps d'un rendu de la plage. La focale
-reste lue dans le rush d'origine ; un éventuel zoom automatique de la stabilisation n'est pas compté.
+**Seul le calque sélectionné compte**, comme avec le Camera Tracker d'AE ou Mocha :
+- un **métrage** est lu directement dans son fichier ;
+- un **précomp** est une boîte noire : After Effects calcule ses images (effets, stabilisation,
+  remappages internes compris) et les envoie au panneau en mémoire, par le **pont STBridge** ;
+- si le calque a lui-même des **effets**, le panneau refuse : précomposez-le (*Calque >
+  Pré-composer*, « Déplacer tous les attributs ») puis trackez le précomp.
+
+La focale est lue dans le rush le plus bas du précomp quand il y en a un.
+
+### Pont After Effects (plug-in natif, une seule fois)
+
+Le plug-in `STBridge` (code dans `native/STBridge/`) est déjà compilé dans `out/native/`. Pour
+l'installer dans chaque version d'After Effects (mot de passe administrateur demandé), puis
+redémarrer AE :
+
+```bash
+native/STBridge/build.sh --install
+```
+
+Il recompile au passage (SDK attendu dans `AfterEffectsSDK/`). Sans le pont, un précomp est rendu
+sur disque par la file d'attente de rendu, ce qui est bien plus lent.
 
 1. **Image de référence** : à l'ouverture, une seule lecture du plan charge les images en mémoire et
    prépare les vignettes de la timeline (bande grise). Cliquez ou glissez dans la timeline, ou

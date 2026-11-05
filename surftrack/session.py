@@ -73,7 +73,13 @@ class Session:
         self.focal_scale = float(seq.get("focal_scale") or 1.0)
         self.comp_fps = float(seq["fps"])
         self.seq_start = int(seq["start"])
-        self.W, self.H = video_size(video)
+        # pont AE : images calculées par After Effects (précomp), src[k] indexe bridge.times
+        self.bridge = seq.get("bridge")
+        if self.bridge:
+            self.W, self.H = int(self.bridge["width"]), int(self.bridge["height"])
+        else:
+            self.W, self.H = video_size(video)
+        self.first = int(seq.get("first") or 0)  # image à charger en premier (la référence)
         self.scale = 0.5 if max(self.W, self.H) > 2600 else 1.0  # 4K : tracking en demi-résolution
         self.S = np.diag([self.scale, self.scale, 1.0])
         self.Si = np.linalg.inv(self.S)
@@ -84,21 +90,40 @@ class Session:
         self.cond = threading.Condition()
         self.load_error = None
         self.stop = threading.Event()
-        self.lens = read_lens_info(self.lens_video)
+        self.lens = read_lens_info(self.lens_video) if self.lens_video and Path(self.lens_video).is_file() else None
 
     # ------------------------------------------------------------------ images
-    def load_all(self):
-        """Une passe de décodage : images de tracking en mémoire + vignettes sur disque."""
-        need = set(self.src.tolist())
-        lo, hi = min(need), max(need)
-        done, last = 0, 0.0
-        try:
+    def _images(self, need):
+        """(indice, image BGR) pour chaque image à charger. Fichier : une lecture dans l'ordre ;
+        pont : AE calcule chaque image, en commençant par la référence."""
+        if not self.bridge:
+            lo, hi = min(need), max(need)
             for s, img in enumerate(iter_bgr(self.video, lo, hi), start=lo):
-                if s not in need:
-                    continue
+                if s in need:
+                    yield s, img
+            return
+        from .bridge import Bridge
+        order = sorted(need)
+        first = int(self.src[min(max(self.first, 0), len(self.src) - 1)])
+        order = [x for x in order if x >= first] + [x for x in reversed(order) if x < first]
+        br = Bridge()
+        ds = int(round(1 / self.scale))
+        try:
+            for s in order:
+                yield s, br.render(self.bridge["item"], self.bridge["times"][s], ds, color=True)
+        finally:
+            br.close()
+
+    def load_all(self):
+        """Une passe : images de tracking en mémoire + vignettes sur disque."""
+        need = set(self.src.tolist())
+        done, last, got = 0, 0.0, []
+        try:
+            for s, img in self._images(need):
                 g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                if self.scale != 1:
-                    g = cv2.resize(g, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA)
+                tw, th_ = int(round(self.W * self.scale)), int(round(self.H * self.scale))
+                if g.shape[1] != tw or g.shape[0] != th_:
+                    g = cv2.resize(g, (tw, th_), interpolation=cv2.INTER_AREA)
                 th = self.thumbs / f"{s:05d}.jpg"
                 if not th.exists():
                     k = min(1.0, self.thumb_side / max(img.shape[:2]))
@@ -110,9 +135,11 @@ class Session:
                     self.gray[s] = g
                     self.cond.notify_all()
                 done += 1
+                got.append(int(s))
                 if time.time() - last > 0.2 or done == len(need):
                     last = time.time()
-                    emit(type="loaded", done=done, total=len(need), upto=s)
+                    emit(type="loaded", done=done, total=len(need), got=got)
+                    got = []
         except Exception as e:  # noqa: BLE001
             self.load_error = str(e)
         with self.cond:
@@ -120,7 +147,8 @@ class Session:
                 self.load_error = f"vidéo plus courte que prévu ({len(self.gray)}/{len(need)} images lues)"
             self.cond.notify_all()
         if self.load_error:
-            emit(type="log", msg="⚠ Lecture de la vidéo : " + self.load_error)
+            emit(type="log", msg="⚠ Lecture des images : " + self.load_error)
+            emit(type="load_error", msg=self.load_error)
 
     def frame(self, k):
         """Image k de la séquence (niveaux de gris, échelle de tracking) ; attend son décodage."""
@@ -138,7 +166,16 @@ class Session:
         out = Path(c["out"])
         if not out.exists():
             out.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(out), read_frame_bgr(self.video, s), [cv2.IMWRITE_JPEG_QUALITY, 92])
+            if self.bridge:
+                from .bridge import Bridge
+                br = Bridge()
+                try:
+                    img = br.render(self.bridge["item"], self.bridge["times"][s], 1, color=True)
+                finally:
+                    br.close()
+            else:
+                img = read_frame_bgr(self.video, s)
+            cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         return {"path": str(out), "src": s}
 
     def cmd_track(self, c):

@@ -9,3 +9,5 @@ tests/
 *.mp4
 panel/demo.jpg
 .claude/
+AfterEffectsSDK/
+AfterEffectsSDK_*.zip

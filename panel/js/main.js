@@ -42,7 +42,8 @@
     workDir: null,
     W: 0, H: 0, n: 0,    // dimensions de la vidéo, nombre d'images de la séquence
     thumbsDir: null,
-    loadedUpto: -1,      // vignettes prêtes jusqu'à cette image du fichier
+    loaded: new Set(),   // images source dont la vignette est prête
+    thumbs: new Map(),   // image source -> vignette décodée en mémoire (lecture fluide)
     k: 0,                // image affichée (indice de séquence)
     ref: 0,              // image de référence (celle où la forme est définie)
     // --- état annulable
@@ -209,9 +210,10 @@
   function onEngineEvent(ev) {
     if (ev.type === 'log') log(ev.msg);
     else if (ev.type === 'loaded') {
-      state.loadedUpto = Math.max(state.loadedUpto, ev.upto);
+      ev.got.forEach((s) => { state.loaded.add(s); cacheThumb(s); });
       drawTimeline();
-      if (!state.cur || state.curThumbMissing) showFrame(state.k, { fast: true });
+    } else if (ev.type === 'load_error') {
+      toast('Lecture des images interrompue : ' + ev.msg);
     } else if (ev.type === 'tracked' && state.tracking) {
       state.Hs[ev.k] = ev.H;
       state.conf[ev.k] = ev.conf;
@@ -242,39 +244,53 @@
     stopPlay();
     Object.assign(state, {
       tool: 'rect', points: [], round: 0, flip: false, orientManual: false, freeNormal: null,
-      Hs: {}, conf: {}, pose: null, undo: [], redo: [], full: new Map(), cur: null, loadedUpto: -1,
+      Hs: {}, conf: {}, pose: null, undo: [], redo: [], full: new Map(), cur: null,
+      loaded: new Set(), thumbs: new Map(),
     });
     state.rev++;
     $('in-focal').value = '';
     syncControls();
   }
 
+  /** Le pont After Effects (plug-in STBridge) répond-il ? */
+  function bridgeAvailable() {
+    return new Promise((resolve) => {
+      const net = nodeRequire('net');
+      const sock = net.createConnection(path.join(APPDIR, 'bridge.sock'));
+      const done = (ok) => { try { sock.destroy(); } catch (e) { /* déjà fermé */ } resolve(ok); };
+      sock.setTimeout(2000, () => done(false));
+      sock.on('error', () => done(false));
+      sock.on('connect', () => sock.write('PING\n'));
+      sock.on('data', (d) => done(String(d).indexOf('OK') === 0));
+    });
+  }
+
   async function loadShot(sel) {
-    if (!sel.ok) { toast(sel.msg); return; }
+    if (!sel.ok) { toast(sel.msg, 12000); return; }
     if (state.eng) { state.eng.close(); state.eng = null; }
     resetEdit();
     state.shot = sel;
     state.n = sel.frames.length;
     state.k = state.ref = sel.cur;
-    const stem = path.basename(sel.file).replace(/\.[^.]+$/, '');
+    const stem = String(sel.footageName || sel.layerName).replace(/\.[^.]+$/, '').replace(/[\/:]/g, '_');
     state.workDir = path.join(ROOT, 'out', 'panel', `${stem}_${stamp()}`);
-    // vignettes gardées d'une fois sur l'autre pour un même fichier (pas pour un rendu : il change)
-    const st = fs.statSync(sel.file);
-    state.thumbsDir = sel.render ? path.join(state.workDir, 'thumbs')
-      : path.join(ROOT, 'out', 'panel', 'cache', `${stem}_${st.size}_${Math.round(st.mtimeMs)}`);
+    // vignettes d'un fichier vidéo : gardées d'une fois sur l'autre ; d'un précomp : il peut changer
+    if (sel.mode === 'file') {
+      const st = fs.statSync(sel.file);
+      state.thumbsDir = path.join(ROOT, 'out', 'panel', 'cache', `${stem}_${st.size}_${Math.round(st.mtimeMs)}`);
+    } else state.thumbsDir = path.join(state.workDir, 'thumbs');
 
-    const via = sel.chain.length > 1 ? ` <span class="dim">via ${sel.chain.slice(1).map(escapeHtml).join(' › ')}</span>` : '';
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
+    const what = sel.mode === 'file' ? path.basename(sel.file) : `précomp « ${escapeHtml(sel.footageName)} »`;
     $('shot-info').innerHTML =
-      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · ${escapeHtml(path.basename(sel.file))}${via}</div>` +
+      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · ${sel.mode === 'file' ? escapeHtml(what) : what}</div>` +
       `<div class="line dim">Images ${sel.seqStart}–${sel.seqStart + state.n - 1} de « ${escapeHtml(sel.compName)} » ` +
       `(${state.n})</div>`;
     const w = $('shot-warnings');
     w.innerHTML = '';
     const note = (m, cls) => { const li = document.createElement('li'); li.textContent = m; if (cls) li.className = cls; w.appendChild(li); };
     sel.warnings.forEach((m) => note(m));
-    if (sel.render) note(`Image modifiée dans la compo (${sel.renderWhy}) : AE rend le calque tel qu'il apparaît, et c'est ce rendu qui est suivi.`, 'note');
     if (sel.retimed) note('Remappage temporel ou étirement pris en compte : le suivi porte sur les images telles que la compo les montre.', 'note');
     $('summary').innerHTML = '';
     $('apply-msg').classList.add('hidden');
@@ -284,11 +300,18 @@
     try {
       fs.mkdirSync(state.workDir, { recursive: true });
       const seq = path.join(state.workDir, 'seq.json');
-      let video = sel.file, spec = { src: sel.frames, fps: sel.compFps, start: sel.seqStart };
-      if (sel.render) {
-        video = await renderLayer(sel);
-        spec = { src: sel.frames.map((_, i) => i), fps: sel.compFps, start: sel.seqStart,
-          lens_src: sel.file, lens_frames: sel.frames, focal_scale: sel.focalScale };
+      let video = sel.file, spec = { src: sel.frames, fps: sel.compFps, start: sel.seqStart, first: sel.cur };
+      if (sel.mode === 'bridge') {
+        const lens = { lens_src: sel.lensFile || null, lens_frames: sel.lensFrames || null, focal_scale: sel.focalScale || 1 };
+        if (await bridgeAvailable()) {  // AE calcule les images du précomp, en mémoire
+          video = 'bridge';
+          spec = Object.assign(spec, lens, { bridge: { item: sel.item, times: sel.times, width: sel.itemW, height: sel.itemH } });
+        } else {  // repli : rendu par la file d'attente
+          note('Pont After Effects absent (plug-in STBridge non installé) : le précomp est rendu sur disque, c\'est plus lent. Voir le README pour l\'installer.');
+          video = await renderLayer(sel);
+          spec = Object.assign(spec, lens, { src: sel.frames.map((_, i) => i),
+            lens_frames: sel.lensFrames ? sel.frames.map((i) => sel.lensFrames[i]) : null });
+        }
       }
       fs.writeFileSync(seq, JSON.stringify(spec));
       const ready = new Promise((resolve) => {
@@ -312,15 +335,15 @@
     }
   }
 
-  /** Fait rendre le calque par AE (effets compris) ; renvoie le dossier d'images ou le fichier rendu. */
+  /** Repli sans le pont : fait rendre le calque par AE ; renvoie le dossier d'images ou le fichier rendu. */
   async function renderLayer(sel) {
     const dir = path.join(state.workDir, 'render');
     const n = sel.frames.length;
-    $('canvas-empty').textContent = `Rendu du calque par After Effects (${sel.renderWhy})…`;
+    $('canvas-empty').textContent = 'Rendu du précomp par After Effects…';
     const poll = setInterval(() => {  // AE est occupé pendant le rendu : on suit les fichiers écrits
       let k = 0;
       try { k = fs.readdirSync(dir).filter((f) => f.indexOf('st_') === 0).length; } catch (e) { /* pas encore créé */ }
-      $('canvas-empty').textContent = `Rendu du calque par After Effects… ${k}/${n}\n(${sel.renderWhy})`;
+      $('canvas-empty').textContent = `Rendu du précomp par After Effects… ${k}/${n}`;
     }, 500);
     let r;
     try {
@@ -334,12 +357,27 @@
     if (!files.length) throw new Error("Le rendu d'After Effects n'a produit aucun fichier dans :\n" + dir);
     if (files.length === 1 && /\.(mov|mp4|avi)$/i.test(files[0])) return path.join(dir, files[0]);
     if (files.length !== n) log(`⚠ Rendu : ${files.length} images pour ${n} attendues.`);
-    log(`Rendu d'After Effects (${r.format || 'format par défaut'}) : ${files.length} fichier(s).`);
     return dir;
   }
 
   // ------------------------------------------------------------------ images
-  function thumbPath(k) { return path.join(state.thumbsDir, pad5(state.shot.frames[k]) + '.jpg'); }
+  /** Vignette d'une image source, décodée une fois et gardée en mémoire (lecture fluide). */
+  function cacheThumb(s) {
+    if (!inCEP || state.thumbs.has(s)) return;
+    state.thumbs.set(s, null);  // en cours
+    const dir = state.thumbsDir;
+    loadImg(fileUrl(path.join(dir, pad5(s) + '.jpg'))).then((img) => {
+      if (dir !== state.thumbsDir) return;  // un autre calque a été chargé entre-temps
+      const keep = (bmp) => {
+        state.thumbs.set(s, bmp);
+        if (state.shot && state.shot.frames[state.k] === s && !state.full.has(state.k)) {
+          state.cur = bmp;
+          if (state.curThumbMissing) { state.curThumbMissing = false; refresh(); } else draw();
+        }
+      };
+      if (window.createImageBitmap) createImageBitmap(img).then(keep).catch(() => keep(img)); else keep(img);
+    }).catch(() => state.thumbs.delete(s));
+  }
 
   /** Image pleine résolution de l'image k (cache de quelques images). */
   async function loadFull(k) {
@@ -365,11 +403,8 @@
     const f = state.full.get(k);
     if (f) { state.cur = f; state.curThumbMissing = false; }
     else if (inCEP) {
-      const p = thumbPath(k);
-      if (state.shot.frames[k] <= state.loadedUpto && fs.existsSync(p)) {
-        state.curThumbMissing = false;
-        loadImg(fileUrl(p)).then((img) => { if (state.k === k && !state.full.has(k)) { state.cur = img; draw(); } }).catch(() => {});
-      } else state.curThumbMissing = true;
+      const t = state.thumbs.get(state.shot.frames[k]);
+      if (t) { state.cur = t; state.curThumbMissing = false; } else state.curThumbMissing = true;
       if (!opts.fast && !state.tracking) {
         clearTimeout(fullTimer);
         fullTimer = setTimeout(() => { if (state.k === k && state.eng) loadFull(k).catch(() => {}); }, 150);
@@ -1105,7 +1140,7 @@
     // vignettes prêtes (bande grise en bas)
     tctx.fillStyle = '#4a4a4a';
     const src = state.shot.frames;
-    for (let k = 0; k < state.n; k++) if (src[k] <= state.loadedUpto) tctx.fillRect(tlX(k, w) - cw / 2, h - 4 * dpr, cw + 0.5, 3 * dpr);
+    for (let k = 0; k < state.n; k++) if (state.loaded.has(src[k])) tctx.fillRect(tlX(k, w) - cw / 2, h - 4 * dpr, cw + 0.5, 3 * dpr);
     // images trackées (couleur selon la confiance)
     const y0 = 9 * dpr, y1 = h - 9 * dpr;
     Object.keys(state.Hs).forEach((key) => {
@@ -1281,7 +1316,7 @@
       state.W = img.width; state.H = img.height; state.n = 60;
       state.shot = { seqStart: 0, compFps: 25, frames: Array.from({ length: 60 }, (_, i) => i), footageName: 'demo' };
       state.k = state.ref = 20;
-      state.loadedUpto = 59;
+      for (let i = 0; i < 60; i++) state.loaded.add(i);
       state.eng = demoEngine(onEngineEvent);
       state.full.set(20, img);
       state.cur = img;
