@@ -15,93 +15,66 @@ Dans le Terminal, depuis ce dossier :
 > Le Python de Homebrew installé sur ce Mac a un module XML cassé : on utilise celui d'Apple (`/usr/bin/python3`).
 > `ffmpeg` (déjà installé) sert à lire la focale dans les métadonnées des caméras Sony.
 
-## Panneau After Effects (recommandé)
+## Dans After Effects : effet + panneau (recommandé)
 
-Installation (une seule fois, puis redémarrer After Effects) :
+### Installation (une fois)
 
-```bash
-ln -sfn "$PWD/panel" ~/Library/Application\ Support/Adobe/CEP/extensions/com.surftrack.panel
-```
+1. Le panneau (puis redémarrer After Effects) :
 
-Le mode développeur CEP doit être activé : `defaults read com.adobe.CSXS.12 PlayerDebugMode` doit
-renvoyer 1, ce qui est le cas sur ce Mac.
+   ```bash
+   ln -sfn "$PWD/panel" ~/Library/Application\ Support/Adobe/CEP/extensions/com.surftrack.panel
+   ```
 
-**Lancement** : branchez le script `ae_scripts/Tracker le calque.jsx` sur un bouton Code Runner, ou
-lancez-le via *Fichier > Scripts*. Sélectionnez le calque vidéo (ou le précomp qui le contient), placez
-l'instant courant sur une image où la surface est bien visible, puis cliquez le bouton. Le panneau
-s'ouvre avec ce calque chargé. Seule la partie du rush visible dans la compo sera trackée.
+   Le mode développeur CEP doit être activé : `defaults read com.adobe.CSXS.12 PlayerDebugMode` doit
+   renvoyer 1, ce qui est le cas sur ce Mac.
+2. Les plug-ins natifs `native/` : l'effet `STEffect` et le pont `STBridge`, qui envoie au panneau les
+   images calculées par After Effects, en mémoire. Mot de passe administrateur demandé, puis
+   redémarrer AE :
 
-> Le script dépose sa demande dans `~/Library/Application Support/3D Surface Tracker/`. AE doit donc
-> autoriser les scripts à écrire des fichiers : *Préférences > Scripts et expressions*.
-> Le bouton ↻ du panneau charge aussi le calque sélectionné.
+   ```bash
+   native/build.sh --install
+   ```
 
-Le panneau suit **exactement les images que montre la compo** : précomps, remappage temporel et
-étirement compris (une image figée ou un ralenti sont suivis tels quels). Les images clés sont
-posées sur les images de la compo.
+   Le SDK d'After Effects est attendu dans `AfterEffectsSDK/` (non versionné).
 
-### Effet « 3D Surface Tracker » (recommandé)
+### Utilisation
 
-Appliquez l'effet *Effet > 3D Surface Tracker > 3D Surface Tracker* **tout en bas de la pile
-d'effets** du calque à tracker, puis cliquez son bouton **Ouvrir le tracker**. Le panneau suit
-l'image du calque **telle qu'elle arrive à l'effet** : une Stabilisation de déformation ou tout
-autre effet placé au-dessus est pris en compte, sans précomposer. L'effet ne modifie pas l'image.
-Les images sont calculées par After Effects et envoyées en mémoire par le pont (rien n'est rendu
-sur disque).
+1. Appliquez l'effet *Effet > 3D Surface Tracker > 3D Surface Tracker* **tout en bas de la pile
+   d'effets** du calque à tracker, puis cliquez **Ouvrir le tracker**. Le panneau suit l'image du
+   calque **telle qu'elle arrive à l'effet** : une Stabilisation de déformation ou tout autre effet
+   placé au-dessus est pris en compte, sans précomposer. Remappages et étirements du calque aussi.
+   Le panneau (*Fenêtre > Extensions > 3D Surface Tracker (panneau)*) ne fonctionne qu'avec l'effet :
+   sur un calque qui ne l'a pas, il propose de l'ajouter.
+2. **Image de référence** : cliquez ou glissez dans la timeline (← → ; Maj : 10 images) jusqu'à une
+   image nette où la surface est bien visible. Avant tout suivi, l'image où vous relâchez devient la
+   référence (triangle jaune).
+3. **Surface** :
+   - **Rectangle** : cliquez les 4 coins. Le curseur d'arrondi arrondit les 4 coins ; cliquez d'abord
+     un coin pour n'arrondir que lui (clic dans le vide : retour aux 4). Tous à fond : **disque**, et
+     ⇅ inverse son inclinaison.
+   - **Forme libre** : cliquez le contour d'une zone plane. La grille épouse la forme.
+   - Glissez un **point**, ou un **côté** pour déplacer ses deux points d'un bloc.
+   - **Orientation** : glissez un **anneau** (X rouge, Y vert, Z bleu) pour tourner la surface autour
+     de cet axe. Pour une forme libre, l'orientation est sinon déduite du mouvement, ce qui demande de
+     la perspective : un rectangle, lui, la donne par ses angles droits.
+   - Vue : molette pour zoomer, Espace ou clic droit pour la déplacer, double-clic pour recadrer.
+4. **Tracker** avec les boutons sous l'image : en arrière jusqu'au bout, une image en arrière, en
+   avant **puis** en arrière, une image en avant, en avant jusqu'au bout. Le suivi part de l'image
+   affichée et s'arrête à la **clé** suivante, au bout du calque, ou s'il décroche ; le bouton en cours
+   devient ■ pour l'arrêter.
+5. **Corriger** : si la forme dérive sur une image, glissez ses points ou ses côtés : ça pose une
+   **clé** (◆ dans la timeline). La forme y est imposée et le suivi est corrigé progressivement entre
+   les clés voisines. Vous pouvez aussi retracker depuis la clé, vers l'avant ou l'arrière, jusqu'à la
+   clé suivante. Le bouton ◆ pose une clé sur l'image affichée, ou la retire.
+6. **Appliquer le tracking** : la pose 3D est écrite en images clés dans l'effet (groupe « Données du
+   tracking »), donc enregistrée avec le projet. Quand l'effet est sélectionné, la grille 3D s'affiche
+   dans la fenêtre de composition (case « Afficher la grille »). Les boutons **Créer : Null / Solide /
+   Texte** de l'effet ajoutent un calque 3D posé sur la surface, avec sa caméra : ils sont liés à
+   l'effet par expressions et suivent donc un nouveau tracking appliqué.
 
-### Sans l'effet
-
-**Seul le calque sélectionné compte**, comme avec le Camera Tracker d'AE ou Mocha :
-- un **métrage** est lu directement dans son fichier ;
-- un **précomp** est une boîte noire : After Effects calcule ses images et les envoie par le pont ;
-- un calque avec des **effets** est refusé : ajoutez-lui l'effet tracker en bas de la pile, ou
-  précomposez-le.
-
-La focale est lue dans le rush du calque (ou le plus bas du précomp) quand il y en a un.
-
-### Plug-ins natifs (une fois)
-
-`native/` contient le pont `STBridge` et l'effet `STEffect`. Pour les compiler et les installer
-dans chaque version d'After Effects (mot de passe administrateur demandé), puis redémarrer AE :
-
-```bash
-native/build.sh --install
-```
-
-Le SDK d'After Effects est attendu dans `AfterEffectsSDK/` (non versionné). Sans le pont, un
-précomp est rendu sur disque par la file d'attente de rendu, ce qui est bien plus lent.
-
-1. **Image de référence** : à l'ouverture, une seule lecture du plan charge les images en mémoire et
-   prépare les vignettes de la timeline (bande grise). Cliquez ou glissez dans la timeline, ou
-   utilisez ← → (Maj : 10 images), jusqu'à une image nette où la surface est bien visible. Avant tout
-   suivi, l'image où vous relâchez devient la référence (repère jaune).
-2. **Surface** :
-   - **Rectangle** : cliquez les 4 coins. Le curseur d'arrondi suit les coins arrondis ; à fond, la
-     forme devient un **disque**, et ⇅ inverse son inclinaison.
-   - **Forme libre** : cliquez le contour d'une zone plane. Son orientation est déduite du mouvement,
-     ou réglée aux anneaux en alignant la grille sur la scène (*Auto* pour revenir au mouvement).
-   - **Orientation** : la grille et les axes 3D (X rouge, Y vert, Z bleu) s'affichent dès que la forme
-     est fermée. Glissez un **anneau** pour tourner la surface autour de cet axe, comme dans AE. Pour
-     un rectangle ou un disque, les coins suivent.
-   - Vue : molette pour zoomer, Espace ou clic droit pour la déplacer, double-clic pour la recadrer.
-     Glissez un point pour le corriger (une loupe s'affiche), clic droit pour le supprimer.
-   - Si la vidéo n'a pas de métadonnées de focale, un champ apparaît pour la saisir.
-3. **Tracker** avec les quatre boutons sous l'image : en arrière jusqu'au début, une image en
-   arrière, une image en avant, en avant jusqu'à la fin. Le suivi part de l'image affichée (la
-   référence ou une image déjà trackée) et s'affiche en direct ; le bouton en cours devient ■ pour
-   l'arrêter. Il s'arrête aussi tout seul s'il décroche. La timeline montre les images trackées
-   (vert, orange si douteux).
-   - Sur une image trackée, glissez un point pour corriger la forme : la correction vaut pour tout
-     le plan, la 3D est recalculée aussitôt, sans retracker.
-   - Sur une surface brillante (reflets), prenez ses bords et ses coins dans la zone suivie : les
-     reflets glissent quand la caméra bouge, pas les arêtes.
-4. **Résultat** : la grille cyan montre la surface 3D calculée, image par image. Cochez les calques à
-   créer (**Null**, **Solide**, **Texte**) puis *Créer dans AE*. Ils sont posés sur la surface et
-   animés ; la caméra AE (créée une fois, puis réutilisée) reste fixe. Pour poser votre contenu,
-   parentez-le au null et mettez sa position à 0,0,0.
-
-**Annuler** : ⌘Z annule n'importe quelle action (points, arrondi, rotation, référence, suivi…),
-⇧⌘Z la rétablit. Les boutons ↶ ↷ font de même. L'icône barrée efface le suivi en gardant la forme,
-la corbeille efface tout.
+**Annuler** : ⌘Z annule n'importe quelle action du panneau (points, arrondis, rotation, clés,
+référence, suivi…), ⇧⌘Z la rétablit. La corbeille propose d'effacer le suivi seul (la forme reste)
+ou tout.
 
 Les fichiers de chaque session sont dans `out/panel/`, les vignettes (gardées d'une fois sur
 l'autre pour un même fichier) dans `out/panel/cache/`.

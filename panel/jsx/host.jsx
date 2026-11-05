@@ -63,7 +63,7 @@ function stGetLayer(compId, layerIndex, time) {
     var comp = stFindComp(compId);
     if (!comp) return stFail("La composition du calque à tracker est introuvable.");
     if (layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Le calque à tracker est introuvable.");
-    return stDescribe(comp, comp.layer(layerIndex), time);
+    return stDescribe(comp, comp.layer(layerIndex), time < 0 ? comp.time : time);
 }
 
 // Temps dans la source d'un calque à l'instant t de sa compo (remappage et étirement
@@ -110,10 +110,9 @@ function stDescribe(comp, sel, time) {
         var below = [], par = sel.property("ADBE Effect Parade");
         for (var e = stFx + 1; e <= par.numProperties; e++) if (par.property(e).active) below.push(par.property(e).name);
         if (below.length) warnings.push("Effets placés sous « 3D Surface Tracker » (" + below.join(", ") + ") : le tracking ne les voit pas. Mettez le tracker en bas de la pile.");
-    } else if (fx.length) {
-        return stFail("Le calque « " + sel.name + " » a des effets (" + fx.join(", ") + ") : le tracking ne les voit pas.\n\n" +
-                      "Ajoutez l'effet « 3D Surface Tracker » tout en bas de sa pile d'effets (il voit alors l'image avec ces effets), " +
-                      "ou précomposez le calque.");
+    } else {  // l'effet porte le tracking : sans lui, le panneau propose de l'ajouter
+        return stJSON({ok: true, needEffect: true, compId: comp.id, compName: comp.name, layerIndex: sel.index,
+                       layerName: sel.name, hasEffects: fx.length > 0});
     }
     var tr = sel.property("ADBE Transform Group");
     var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
@@ -325,4 +324,63 @@ function stApply(compId, layerIndex, jsxPath, layers) {
     var r = String($.global.ST_RESULT);
     if (r.indexOf("ERREUR ") === 0) return stFail(r.substring(7));
     return stJSON({ok: true, msg: r});
+}
+
+// Effet « 3D Surface Tracker » du calque (objet propriété), ou null.
+function stTrackerFx(comp, layerIndex) {
+    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return null;
+    var i = stTrackerEffect(comp.layer(layerIndex));
+    return i ? comp.layer(layerIndex).property("ADBE Effect Parade").property(i) : null;
+}
+
+// Ajoute l'effet au calque, en bas de la pile.
+function stAddTrackerEffect(compId, layerIndex) {
+    var comp = stFindComp(compId);
+    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
+    var L = comp.layer(layerIndex);
+    if (!L.property("ADBE Effect Parade").canAddProperty("SurfTrack 3D Surface Tracker")) {
+        return stFail("L'effet « 3D Surface Tracker » n'est pas installé (native/build.sh --install, puis redémarrer AE).");
+    }
+    app.beginUndoGroup("3D Surface Tracker : ajouter l'effet");
+    L.property("ADBE Effect Parade").addProperty("SurfTrack 3D Surface Tracker");
+    app.endUndoGroup();
+    return stJSON({ok: true});
+}
+
+// Écrit le tracking dans l'effet du calque : images clés de la pose (pixels de l'image du
+// calque) ; d : données build_ae_data du moteur. Les clés précédentes sont remplacées.
+function stApplyTracking(compId, layerIndex, d) {
+    var comp = stFindComp(compId);
+    var fx = stTrackerFx(comp, layerIndex);
+    if (!fx) return stFail("L'effet « 3D Surface Tracker » est absent du calque.");
+    var fd = comp.frameDuration, times = [], i;
+    for (i = 0; i < d.frames.length; i++) times.push(d.frames[i] * fd);
+    function clear(p) { while (p.numKeys > 0) p.removeKey(1); }
+    function keys(name, vals) {
+        var p = fx.property(name);
+        clear(p);
+        if (vals.length === 1 || times.length === 1) p.setValue(vals[0]);
+        else p.setValuesAtTimes(times, vals);
+    }
+    function col(a, j) { var o = []; for (var q = 0; q < a.length; q++) o.push(a[q][j]); return o; }
+    app.beginUndoGroup("3D Surface Tracker : appliquer le tracking");
+    keys("Position X", col(d.srfPos, 0));
+    keys("Position Y", col(d.srfPos, 1));
+    keys("Position Z", col(d.srfPos, 2));
+    keys("Orientation X", col(d.srfOri, 0));
+    keys("Orientation Y", col(d.srfOri, 1));
+    keys("Orientation Z", col(d.srfOri, 2));
+    keys("Zoom caméra", d.zoom);
+    var statics = {"Largeur": d.size[0], "Hauteur": d.size[1], "Distance caméra": -d.camPos[0][2],
+                   "Image L": d.width, "Image H": d.height};
+    for (var n in statics) if (statics.hasOwnProperty(n)) { clear(fx.property(n)); fx.property(n).setValue(statics[n]); }
+    fx.property("Forme").setValue(d.shape === "disc" ? 2 : d.shape === "free" ? 3 : 1);
+    var pts = d.outline || [];
+    fx.property("Points du contour").setValue(d.shape === "disc" ? 0 : Math.min(pts.length, 32));
+    for (i = 0; i < 32; i++) {
+        fx.property("U" + (i + 1)).setValue(i < pts.length ? pts[i][0] : 0);
+        fx.property("V" + (i + 1)).setValue(i < pts.length ? pts[i][1] : 0);
+    }
+    app.endUndoGroup();
+    return stJSON({ok: true, frames: d.frames.length});
 }

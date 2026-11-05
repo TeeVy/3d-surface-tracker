@@ -49,8 +49,8 @@ def make_surface(c):
     if c["tool"] == "rect":
         if len(pts) != 4:
             raise ValueError("Un rectangle se désigne par exactement 4 coins.")
-        r = float(c.get("roundness", 0))
-        return DiscSurface.from_square(pts) if r >= 0.999 else RectSurface(pts, r)
+        r = np.broadcast_to(np.asarray(c.get("roundness", 0), float), (4,))
+        return DiscSurface.from_square(pts) if np.all(r >= 0.999) else RectSurface(pts, r)
     return FreeSurface(pts)
 
 
@@ -251,15 +251,18 @@ class Session:
         sol = solve(track, surf, self.W, self.H, focal, normal_hint=c.get("normal"), frames_small=frames,
                     track_scale=self.scale, log=log)
         pose = sol["pose"]
+        outline = sol["outline"] if surf.kind == "free" else surf.outline_unit() if surf.kind == "rect" else None
         res = Result(self.W, self.H, self.comp_fps, n, track, sol["ref_corners"], sol["corners"], pose, source,
                      surf, None, sol["conics"], frame_offset=self.seq_start, motion_mode="object",
-                     outline=sol["outline"])
+                     outline=None if outline is None else _resample(outline, 32))
         out = {}
         if pose.valid.any():
             jsx = Path(c["out"])
             jsx.parent.mkdir(parents=True, exist_ok=True)
-            write_jsx(jsx, build_ae_data(res, "object"), name=f"ST {c.get('name') or Path(self.video).stem}")
+            ae = build_ae_data(res, "object")
+            write_jsx(jsx, ae, name=f"ST {c.get('name') or Path(self.video).stem}")
             out["jsx"] = str(jsx)
+            out["ae"] = ae  # valeurs d'images clés pour l'effet (panneau : « Appliquer le tracking »)
         frames_out = {}
         for i in np.flatnonzero(pose.valid):
             frames_out[str(int(i))] = {"R": np.round(pose.R[i], 7).ravel().tolist(),
@@ -273,6 +276,18 @@ class Session:
                    error_mean=float(np.nanmean(err)) if len(err) else None,
                    error_max=float(np.nanmax(err)) if len(err) else None, log=logs)
         return out
+
+
+def _resample(poly, n):
+    """Contour fermé ramené à n points au plus, régulièrement espacés le long du bord."""
+    poly = np.asarray(poly, float)
+    if len(poly) <= n:
+        return poly
+    closed = np.vstack([poly, poly[:1]])
+    seg = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+    s = np.concatenate([[0], np.cumsum(seg)])
+    t = np.linspace(0, s[-1], n, endpoint=False)
+    return np.column_stack([np.interp(t, s, closed[:, 0]), np.interp(t, s, closed[:, 1])])
 
 
 class _Frames:

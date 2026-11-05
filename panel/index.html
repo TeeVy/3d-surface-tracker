@@ -9,7 +9,7 @@
   <!-- Calque chargé (par le script « Tracker le calque » ou le bouton ↻) -->
   <header>
     <div id="shot" class="shot">
-      <div id="shot-empty" class="dim">Aucun calque — lancez « Tracker le calque » sur un calque vidéo.</div>
+      <div id="shot-empty" class="dim">Aucun calque — appliquez l'effet « 3D Surface Tracker » à un calque, puis cliquez « Ouvrir le tracker ».</div>
       <div id="shot-info" class="hidden"></div>
     </div>
     <button id="btn-load" class="tool icon" title="Charger le calque sélectionné dans AE">
@@ -29,7 +29,7 @@
           <svg viewBox="0 0 24 24"><path d="M5 17l2-10 6 3 6-5-1 9-5 4z"/></svg>
         </button>
       </div>
-      <label id="round-wrap" class="inline grow" title="Arrondi des coins — à fond : disque">
+      <label id="round-wrap" class="inline grow" title="Arrondi des coins (cliquez un coin pour l'arrondir seul) — tous à fond : disque">
         <svg class="ico" viewBox="0 0 24 24"><path d="M5 19V11a6 6 0 0 1 6-6h8"/></svg>
         <input id="in-round" type="range" min="0" max="100" step="1" value="0">
         <span id="round-val" class="mono">0 %</span>
@@ -44,35 +44,48 @@
       <button id="btn-redo" class="tool icon" title="Rétablir (⇧⌘Z)" disabled>
         <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H9a5 5 0 0 0 0 10h3"/></svg>
       </button>
-      <button id="btn-clear-track" class="tool icon hidden" title="Effacer le suivi (garde la forme)">
-        <svg viewBox="0 0 24 24"><path d="M3 12h18M7 8v8M12 8v8M17 8v8M4 4l16 16"/></svg>
-      </button>
-      <button id="btn-clear" class="tool icon" title="Tout effacer (forme et suivi)">
-        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/></svg>
-      </button>
+      <div class="pop-wrap">
+        <button id="btn-clear" class="tool icon" title="Effacer…">
+          <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/></svg>
+        </button>
+        <div id="clear-menu" class="pop hidden">
+          <button id="btn-clear-track" title="Garde la forme, efface le suivi et les clés">Effacer le suivi</button>
+          <button id="btn-clear-all" title="Efface la forme et le suivi">Tout effacer</button>
+        </div>
+      </div>
     </div>
 
     <div id="canvas-wrap">
       <canvas id="view"></canvas>
       <div id="badge" class="badge hidden"></div>
       <div id="canvas-empty">L'image du calque s'affichera ici.</div>
+      <div id="need-effect" class="need hidden">
+        <div id="need-text"></div>
+        <button id="btn-add-effect" class="primary">Ajouter l'effet au calque</button>
+      </div>
     </div>
 
     <div class="transport">
       <div class="seg">
-        <button id="btn-back-all" class="tool icon trk" data-dir="-1" data-count="0" title="Tracker en arrière jusqu'au début">
+        <button id="btn-back-all" class="tool icon trk" data-dir="-1" data-count="0" title="Tracker en arrière, jusqu'à la clé précédente ou au début">
           <svg class="solid" viewBox="0 0 24 24"><path d="M11.5 6v12L3 12zM21 6v12l-8.5-6z"/></svg>
         </button>
         <button id="btn-back-1" class="tool icon trk" data-dir="-1" data-count="1" title="Tracker une image en arrière">
           <svg class="solid" viewBox="0 0 24 24"><path d="M5 6h2.5v12H5zM19 6v12l-10-6z"/></svg>
         </button>
+        <button id="btn-both" class="tool icon trk" data-dir="0" data-count="0" title="Tracker en avant puis en arrière (jusqu'aux clés voisines)">
+          <svg class="solid" viewBox="0 0 24 24"><path d="M10 6v12l-8-6zM14 6v12l8-6z"/></svg>
+        </button>
         <button id="btn-fwd-1" class="tool icon trk" data-dir="1" data-count="1" title="Tracker une image en avant">
           <svg class="solid" viewBox="0 0 24 24"><path d="M5 6v12l10-6zM16.5 6H19v12h-2.5z"/></svg>
         </button>
-        <button id="btn-fwd-all" class="tool icon trk" data-dir="1" data-count="0" title="Tracker en avant jusqu'à la fin">
+        <button id="btn-fwd-all" class="tool icon trk" data-dir="1" data-count="0" title="Tracker en avant, jusqu'à la clé suivante ou à la fin">
           <svg class="solid" viewBox="0 0 24 24"><path d="M3 6v12l8.5-6zM12.5 6v12l8.5-6z"/></svg>
         </button>
       </div>
+      <button id="btn-key" class="tool icon" title="Clé">
+        <svg viewBox="0 0 24 24"><path id="key-path" d="M12 4l8 8-8 8-8-8z"/></svg>
+      </button>
       <button id="btn-play" class="tool icon" title="Lecture / pause (vignettes)">
         <svg class="solid" viewBox="0 0 24 24"><path id="play-path" d="M7 5l12 7-12 7z"/></svg>
       </button>
@@ -95,15 +108,12 @@
     </div>
   </section>
 
-  <!-- Résultat + création des calques -->
+  <!-- Résultat -->
   <section id="s-result" class="disabled">
     <ul id="summary" class="summary"></ul>
     <div class="row export">
-      <label class="chip" title="Null 3D au centre de la surface : parentez-y votre contenu"><input type="checkbox" id="chk-null" checked><span>Null</span></label>
-      <label class="chip" title="Solide de la taille de la surface"><input type="checkbox" id="chk-solid" checked><span>Solide</span></label>
-      <label class="chip" title="Calque texte posé sur la surface"><input type="checkbox" id="chk-text"><span>Texte</span></label>
-      <span class="grow"></span>
-      <button id="btn-apply" class="primary" disabled>Créer dans AE</button>
+      <span class="grow dim" id="apply-hint">Le tracking est écrit dans l'effet : la grille s'affiche dans AE quand l'effet est sélectionné, et ses boutons créent null, solide ou texte.</span>
+      <button id="btn-apply" class="primary" disabled>Appliquer le tracking</button>
     </div>
     <div id="apply-msg" class="info hidden"></div>
     <details id="log-box"><summary>Journal</summary><pre id="log"></pre></details>

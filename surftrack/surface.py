@@ -111,19 +111,35 @@ def unit_square_homography(corners):
     return cv2.getPerspectiveTransform(src, np.float32(corners)).astype(np.float64)
 
 
+def _radii(roundness):
+    """Rayons des 4 coins (HG, HD, BD, BG) en fraction de la demi-largeur, 0..0.5 dans le carré unité."""
+    r = np.broadcast_to(np.asarray(roundness, float), (4,))
+    return 0.5 * np.clip(r, 0, 1)
+
+
+def rounded_unit(roundness, per_arc=12):
+    """Contour du rectangle arrondi dans le carré unité [0,1]² (un arrondi par coin, ou un seul
+    pour les 4). Un coin sans arrondi reste un point."""
+    rh, rd, rb, rg = _radii(roundness)[[0, 1, 2, 3]]
+    pts = []
+    for r, cx, cy, a0 in ((rd, 1 - rd, rd, -90), (rb, 1 - rb, 1 - rb, 0), (rg, rg, 1 - rg, 90), (rh, rh, rh, 180)):
+        if r <= 1e-6:
+            pts.append((cx, cy))
+            continue
+        for a in np.radians(np.linspace(a0, a0 + 90, per_arc)):
+            pts.append((cx + r * np.cos(a), cy + r * np.sin(a)))
+    return np.array(pts)
+
+
 def rounded_outline(corners, roundness, per_arc=12):
     """Contour d'un rectangle aux coins arrondis, vu en perspective.
 
-    roundness 0..1 : rayon des arrondis en fraction de la demi-largeur (même
-    construction que dans le panneau : arcs dans le carré unité, puis homographie)."""
-    r = 0.5 * float(np.clip(roundness, 0, 1))
-    if r <= 1e-6:
+    roundness 0..1 (un nombre, ou un par coin HG, HD, BD, BG) : rayon des arrondis en fraction
+    de la demi-largeur (même construction que dans le panneau : arcs dans le carré unité, puis
+    homographie)."""
+    if np.all(_radii(roundness) <= 1e-6):
         return np.asarray(corners, np.float64)
-    pts = []
-    for cx, cy, a0 in ((1 - r, r, -90), (1 - r, 1 - r, 0), (r, 1 - r, 90), (r, r, 180)):
-        for a in np.radians(np.linspace(a0, a0 + 90, per_arc)):
-            pts.append((cx + r * np.cos(a), cy + r * np.sin(a)))
-    return warp_points(unit_square_homography(corners), pts)
+    return warp_points(unit_square_homography(corners), rounded_unit(roundness, per_arc))
 
 
 def inscribed_conic(corners):
@@ -141,10 +157,14 @@ class RectSurface:
 
     def __init__(self, corners, roundness=0.0):
         self.corners = np.asarray(corners, np.float64).reshape(4, 2)
-        self.roundness = float(roundness)
+        self.roundness = np.broadcast_to(np.asarray(roundness, float), (4,)).copy()
 
     def track_polygon(self):
         return rounded_outline(self.corners, self.roundness)
+
+    def outline_unit(self):
+        """Contour en coordonnées 0..1 du rectangle (None s'il n'est pas arrondi)."""
+        return None if np.all(self.roundness <= 1e-6) else rounded_unit(self.roundness, per_arc=8)
 
     def reference_corners(self, focal, width, height, homographies=None):
         """4 coins d'un vrai rectangle sur l'image de référence (+ proportions inconnues : None)."""
