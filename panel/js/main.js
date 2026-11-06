@@ -1,12 +1,14 @@
 /* 3D Surface Tracker — panneau After Effects (CEP).
  *
- * Le panneau pilote une session du moteur Python (engine.py session, lignes JSON) via
- * Node.js et parle à After Effects via ExtendScript (jsx/host.jsx).
+ * Le calque tracké porte l'effet « 3D Surface Tracker ». Le panneau pilote une session du
+ * moteur Python (engine.py session, lignes JSON) : les images sont celles du calque telles
+ * qu'elles arrivent à l'effet, calculées par After Effects et envoyées par le pont STBridge.
+ * Il parle à After Effects via ExtendScript (jsx/host.jsx).
  *
- * La séquence suivie est celle de la compo : l'image k montre l'image src[k] du fichier
- * (précomps, remappages et étirements résolus par AE). Le panneau garde l'état complet
- * (forme, homographies image par image) : chaque action peut être annulée (⌘Z), et le
- * moteur ne sert qu'à décoder, suivre et calculer la 3D.
+ * Le panneau garde l'état complet (forme, homographies image par image, clés de correction) :
+ * chaque action peut être annulée (⌘Z), et ce travail est enregistré dans le projet (XMP)
+ * pour être retrouvé à la réouverture. Le moteur ne sert qu'à charger les images, suivre et
+ * calculer la pose.
  *
  * Hors d'After Effects (navigateur), il passe en mode démo avec un moteur simulé.
  */
@@ -20,6 +22,7 @@
   const path = inCEP && nodeRequire && nodeRequire('path');
   const cp = inCEP && nodeRequire && nodeRequire('child_process');
   const os = inCEP && nodeRequire && nodeRequire('os');
+  const net = inCEP && nodeRequire && nodeRequire('net');
   const nodeProcess = inCEP && nodeRequire && nodeRequire('process');
 
   // ------------------------------------------------------------------ chemins
@@ -33,6 +36,7 @@
   const ENGINE = ROOT && path.join(ROOT, 'engine.py');
   const APPDIR = inCEP ? path.join(os.homedir(), 'Library', 'Application Support', '3D Surface Tracker') : null;
   const I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const CORNERS = ['HG', 'HD', 'BD', 'BG'];
 
   // ------------------------------------------------------------------ état
   const state = {
@@ -40,35 +44,35 @@
     eng: null,           // session du moteur
     lensMm: null,        // focale des métadonnées (éq. 35 mm), si présente
     workDir: null,
-    W: 0, H: 0, n: 0,    // dimensions de la vidéo, nombre d'images de la séquence
+    W: 0, H: 0, n: 0,    // dimensions de l'image du calque, nombre d'images
     thumbsDir: null,
-    loaded: new Set(),   // images source dont la vignette est prête
-    thumbs: new Map(),   // image source -> vignette décodée en mémoire (lecture fluide)
-    k: 0,                // image affichée (indice de séquence)
+    loaded: new Set(),   // images dont la vignette est prête
+    thumbs: new Map(),   // image -> vignette décodée en mémoire (lecture fluide)
+    k: 0,                // image affichée
     ref: 0,              // image de référence (celle où la forme est définie)
     // --- état annulable
-    tool: 'rect',        // 'rect' | 'free'
-    points: [],          // forme, en pixels de la vidéo, sur l'image de référence
+    points: [],          // 4 coins, en pixels de l'image, sur l'image de référence
     round: [0, 0, 0, 0], // arrondi des coins HG, HD, BD, BG, 0..100 (tous à 100 = disque)
-    selCorner: -1,       // coin choisi pour l'arrondi (position HG=0…BG=3), -1 : tous
     flip: false,         // disque : autre inclinaison
-    orientManual: false, // forme libre : orientation réglée au gizmo
-    freeNormal: null,    // forme libre : normale choisie (repère caméra)
+    mode2d: false,       // 2D : surface face à la caméra
     Hs: {},              // k -> homographie référence -> image k trouvée par le suivi (9 nombres)
     keys: {},            // k -> homographie fixée à la main sur cette image (clé de correction)
     conf: {},            // k -> confiance du suivi
+    // --- outils
+    xform: 'move',       // gizmo : 'move' | 'rotate' | 'scale'
+    space: 'local',      // axes du gizmo : 'local' (suit la surface) | 'world' (face à la caméra)
     // ---
-    rev: 0,              // incrémenté à chaque modification (invalide la 3D)
-    pose: null,          // dernière 3D calculée {rev, poses, size, kind, outline, jsx, ...}
+    rev: 0,              // incrémenté à chaque modification (invalide la pose)
+    pose: null,          // dernière pose calculée {rev, poses, size, kind, ae, ...}
     solving: false,
     full: new Map(),     // k -> image pleine résolution (quelques-unes en cache)
     cur: null,           // image affichée
+    curThumbMissing: false,
     view: null,          // {s, ox, oy, fit} en pixels canvas
     drag: null,
-    hover: -1,
-    hoverRing: null,
-    space: false,
-    tracking: null,      // {dir, count, btn}
+    hover: null,         // élément sous la souris (point, poignée, côté…)
+    spaceKey: false,
+    tracking: null,      // {btn, cancel}
     playTimer: null,
     scrubbing: false,
     undo: [], redo: [],
@@ -115,8 +119,12 @@
     });
   }
 
+  function remember(key, value) { try { localStorage.setItem('st.' + key, value); } catch (e) { /* indisponible */ } }
+  function recall(key, dflt) { try { const v = localStorage.getItem('st.' + key); return v === null ? dflt : v; } catch (e) { return dflt; } }
+
   // ------------------------------------------------------------------ After Effects
   function host(fn, ...args) {
+    if (!inCEP) return Promise.resolve({ ok: false, msg: 'Hors d\'After Effects.' });
     const call = `${fn}(${args.map((a) => JSON.stringify(a)).join(',')})`;
     return new Promise((resolve) => {
       window.__adobe_cep__.evalScript(call, (r) => {
@@ -134,12 +142,12 @@
   }
 
   /** Session du moteur : une ligne JSON par commande, réponses {type:'reply', id}. */
-  function startEngine(args, onEvent) {
+  function startEngine(seqPath, thumbsDir, onEvent) {
     if (!fs.existsSync(PY)) {
       throw new Error("Environnement Python introuvable :\n" + PY +
         "\n\nDans le Terminal, depuis le dossier du projet :\n/usr/bin/python3 -m venv .venv && .venv/bin/pip install -r requirements.txt");
     }
-    const child = cp.spawn(PY, [ENGINE, 'session'].concat(args), { cwd: ROOT, env: pythonEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = cp.spawn(PY, [ENGINE, 'session', seqPath, thumbsDir], { cwd: ROOT, env: pythonEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     const eng = { child, nextId: 1, waiters: new Map(), dead: false, onEvent };
     let buf = '', stderr = '';
     child.stdout.on('data', (d) => {
@@ -173,7 +181,7 @@
         refresh();
       }
     });
-    eng.send = (cmd, onEv) => new Promise((resolve, reject) => {
+    eng.send = (cmd) => new Promise((resolve, reject) => {
       if (eng.dead) { reject(new Error('Le moteur est arrêté : rechargez le calque.')); return; }
       const id = eng.nextId++;
       eng.waiters.set(id, { resolve, reject });
@@ -184,7 +192,7 @@
     return eng;
   }
 
-  /** Moteur simulé (mode démo dans un navigateur) : suivi = léger glissement, pas de 3D. */
+  /** Moteur simulé (mode démo dans un navigateur) : suivi = léger glissement, pas de pose. */
   function demoEngine(onEvent) {
     const eng = { dead: false, onEvent, stopFlag: false };
     eng.send = (cmd) => new Promise((resolve) => {
@@ -212,7 +220,7 @@
   function onEngineEvent(ev) {
     if (ev.type === 'log') log(ev.msg);
     else if (ev.type === 'loaded') {
-      ev.got.forEach((s) => { state.loaded.add(s); cacheThumb(s); });
+      ev.got.forEach((k) => { state.loaded.add(k); cacheThumb(k); });
       drawTimeline();
     } else if (ev.type === 'load_error') {
       toast('Lecture des images interrompue : ' + ev.msg);
@@ -225,8 +233,20 @@
     }
   }
 
+  /** Le pont After Effects (plug-in STBridge) répond-il ? */
+  function bridgeAvailable() {
+    return new Promise((resolve) => {
+      const sock = net.createConnection(path.join(APPDIR, 'bridge.sock'));
+      const done = (ok) => { try { sock.destroy(); } catch (e) { /* déjà fermé */ } resolve(ok); };
+      sock.setTimeout(2000, () => done(false));
+      sock.on('error', () => done(false));
+      sock.on('connect', () => sock.write('PING\n'));
+      sock.on('data', (d) => done(String(d).indexOf('OK') === 0));
+    });
+  }
+
   // ------------------------------------------------------------------ calque à tracker
-  /** Demandes du script « Tracker le calque » + signal de vie (le script ne rouvre pas un panneau ouvert). */
+  /** Demandes du bouton « Ouvrir le tracker » de l'effet + signal de vie (il ne rouvre pas un panneau ouvert). */
   function heartbeat() {
     try {
       fs.mkdirSync(APPDIR, { recursive: true });
@@ -245,26 +265,12 @@
   function resetEdit() {
     stopPlay();
     Object.assign(state, {
-      tool: 'rect', points: [], round: [0, 0, 0, 0], selCorner: -1, flip: false, orientManual: false, freeNormal: null,
-      Hs: {}, keys: {}, conf: {}, pose: null, undo: [], redo: [], full: new Map(), cur: null,
-      loaded: new Set(), thumbs: new Map(),
+      points: [], round: [0, 0, 0, 0], flip: false, mode2d: false, Hs: {}, keys: {}, conf: {}, pose: null,
+      undo: [], redo: [], full: new Map(), cur: null, loaded: new Set(), thumbs: new Map(),
     });
     state.rev++;
     $('in-focal').value = '';
     syncControls();
-  }
-
-  /** Le pont After Effects (plug-in STBridge) répond-il ? */
-  function bridgeAvailable() {
-    return new Promise((resolve) => {
-      const net = nodeRequire('net');
-      const sock = net.createConnection(path.join(APPDIR, 'bridge.sock'));
-      const done = (ok) => { try { sock.destroy(); } catch (e) { /* déjà fermé */ } resolve(ok); };
-      sock.setTimeout(2000, () => done(false));
-      sock.on('error', () => done(false));
-      sock.on('connect', () => sock.write('PING\n'));
-      sock.on('data', (d) => done(String(d).indexOf('OK') === 0));
-    });
   }
 
   /** Calque sans l'effet : le panneau propose de l'ajouter (il porte le tracking dans le projet). */
@@ -274,7 +280,6 @@
     state.shot = null;
     state.n = 0;
     enable('s-surface', true);
-    enable('s-result', false);
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
     $('shot-info').innerHTML = `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · « ${escapeHtml(sel.compName)} »</div>`;
@@ -298,24 +303,17 @@
     if (state.eng) { state.eng.close(); state.eng = null; }
     resetEdit();
     state.shot = sel;
-    state.n = sel.frames.length;
+    state.n = sel.times.length;
     state.k = state.ref = sel.cur;
-    const stem = String(sel.footageName || sel.layerName).replace(/\.[^.]+$/, '').replace(/[\/:]/g, '_');
+    const stem = String(sel.layerName).replace(/[\/:]/g, '_').slice(0, 40);
     state.workDir = path.join(ROOT, 'out', 'panel', `${stem}_${stamp()}`);
-    // vignettes d'un fichier vidéo : gardées d'une fois sur l'autre ; d'un précomp : il peut changer
-    if (sel.mode === 'file') {
-      const st = fs.statSync(sel.file);
-      state.thumbsDir = path.join(ROOT, 'out', 'panel', 'cache', `${stem}_${st.size}_${Math.round(st.mtimeMs)}`);
-    } else state.thumbsDir = path.join(state.workDir, 'thumbs');
+    state.thumbsDir = path.join(state.workDir, 'thumbs');
 
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
-    const what = sel.mode === 'file' ? path.basename(sel.file)
-      : sel.mode === 'layer' ? `avant l'effet tracker (n° ${sel.effectIndex})` : `précomp « ${escapeHtml(sel.footageName)} »`;
     $('shot-info').innerHTML =
-      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · ${sel.mode === 'file' ? escapeHtml(what) : what}</div>` +
-      `<div class="line dim">Images ${sel.seqStart}–${sel.seqStart + state.n - 1} de « ${escapeHtml(sel.compName)} » ` +
-      `(${state.n})</div>`;
+      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · « ${escapeHtml(sel.compName)} »</div>` +
+      `<div class="line dim">Images ${sel.seqStart}–${sel.seqStart + state.n - 1} (${state.n}), telles qu'elles arrivent à l'effet</div>`;
     const w = $('shot-warnings');
     w.innerHTML = '';
     const note = (m, cls) => { const li = document.createElement('li'); li.textContent = m; if (cls) li.className = cls; w.appendChild(li); };
@@ -327,30 +325,18 @@
 
     $('btn-load').disabled = true;
     try {
+      if (!(await bridgeAvailable())) {
+        throw new Error('Pont After Effects absent : installez les plug-ins (native/build.sh --install) puis redémarrez After Effects.');
+      }
       fs.mkdirSync(state.workDir, { recursive: true });
       const seq = path.join(state.workDir, 'seq.json');
-      let video = sel.file, spec = { src: sel.frames, fps: sel.compFps, start: sel.seqStart, first: sel.cur };
-      if (sel.mode === 'bridge' || sel.mode === 'layer') {
-        const lens = { lens_src: sel.lensFile || null, lens_frames: sel.lensFrames || null, focal_scale: sel.focalScale || 1 };
-        if (await bridgeAvailable()) {  // AE calcule les images, en mémoire
-          video = 'bridge';
-          const bridge = { item: sel.item, times: sel.times, width: sel.itemW, height: sel.itemH };
-          if (sel.mode === 'layer') bridge.layer = { comp: sel.compId, layer: sel.layerIndex, effect: sel.effectIndex, time: 'L' };
-          spec = Object.assign(spec, lens, { bridge });
-        } else if (sel.mode === 'layer') {
-          throw new Error('Pont After Effects absent : il faut le plug-in STBridge pour suivre un calque avec l\'effet « 3D Surface Tracker ». Voir le README.');
-        } else {  // repli : rendu par la file d'attente
-          note('Pont After Effects absent (plug-in STBridge non installé) : le précomp est rendu sur disque, c\'est plus lent. Voir le README pour l\'installer.');
-          video = await renderLayer(sel);
-          spec = Object.assign(spec, lens, { src: sel.frames.map((_, i) => i),
-            lens_frames: sel.lensFrames ? sel.frames.map((i) => sel.lensFrames[i]) : null });
-        }
-      }
-      fs.writeFileSync(seq, JSON.stringify(spec));
+      fs.writeFileSync(seq, JSON.stringify({
+        times: sel.times, fps: sel.compFps, start: sel.seqStart, first: sel.cur, width: sel.width, height: sel.height,
+        layer: { comp: sel.compId, layer: sel.layerIndex, effect: sel.effectIndex },
+        lens_src: sel.lensFile || null, lens_frames: sel.lensFrames || null, focal_scale: sel.focalScale || 1,
+      }));
       const ready = new Promise((resolve) => {
-        state.eng = startEngine([video, seq, state.thumbsDir], (ev) => {
-          if (ev.type === 'ready') resolve(ev); else onEngineEvent(ev);
-        });
+        state.eng = startEngine(seq, state.thumbsDir, (ev) => { if (ev.type === 'ready') resolve(ev); else onEngineEvent(ev); });
       });
       const info = await ready;
       state.W = info.width;
@@ -358,58 +344,75 @@
       state.lensMm = info.lens ? info.lens.focal35_mm : null;
       $('focal-wrap').classList.toggle('hidden', !!state.lensMm);
       enable('s-surface', true);
+      await restoreSession();
       await loadFull(state.k);
       fitView();
     } catch (e) {
-      toast(e.message);
+      toast(e.message, 12000);
     } finally {
       $('btn-load').disabled = false;
       refresh();
     }
   }
 
-  /** Repli sans le pont : fait rendre le calque par AE ; renvoie le dossier d'images ou le fichier rendu. */
-  async function renderLayer(sel) {
-    const dir = path.join(state.workDir, 'render');
-    const n = sel.frames.length;
-    $('canvas-empty').textContent = 'Rendu du précomp par After Effects…';
-    const poll = setInterval(() => {  // AE est occupé pendant le rendu : on suit les fichiers écrits
-      let k = 0;
-      try { k = fs.readdirSync(dir).filter((f) => f.indexOf('st_') === 0).length; } catch (e) { /* pas encore créé */ }
-      $('canvas-empty').textContent = `Rendu du précomp par After Effects… ${k}/${n}`;
-    }, 500);
-    let r;
-    try {
-      r = await host('stRenderLayer', sel.compId, sel.layerIndex, sel.seqStart, n, dir);
-    } finally {
-      clearInterval(poll);
-      $('canvas-empty').textContent = "L'image du calque s'affichera ici.";
-    }
-    if (!r.ok) throw new Error(r.msg);
-    const files = fs.readdirSync(dir).filter((f) => f.indexOf('st_') === 0).sort();
-    if (!files.length) throw new Error("Le rendu d'After Effects n'a produit aucun fichier dans :\n" + dir);
-    if (files.length === 1 && /\.(mov|mp4|avi)$/i.test(files[0])) return path.join(dir, files[0]);
-    if (files.length !== n) log(`⚠ Rendu : ${files.length} images pour ${n} attendues.`);
-    return dir;
+  // ------------------------------------------------------------------ travail enregistré dans le projet
+  /** Données à enregistrer : images repérées par leur numéro dans la compo (robuste si le calque est raccourci). */
+  function sessionData() {
+    const off = state.shot.seqStart, num = (v) => Number(v.toPrecision(9));
+    const byFrame = (o, f) => { const r = {}; Object.keys(o).forEach((k) => { r[+k + off] = f(o[k]); }); return r; };
+    return {
+      v: 1, ref: state.ref + off, points: state.points, round: state.round, flip: state.flip, mode2d: state.mode2d,
+      focal: $('in-focal').value, Hs: byFrame(state.Hs, (h) => h.map(num)), keys: byFrame(state.keys, (h) => h.map(num)),
+      conf: byFrame(state.conf, (c) => Math.round(c * 100) / 100),
+    };
+  }
+
+  let saveTimer = null;
+  function scheduleSave(now) {
+    if (!inCEP || !state.shot || state.tracking) return;
+    clearTimeout(saveTimer);
+    const save = () => host('stSaveSession', state.shot.compId, state.shot.layerIndex, JSON.stringify(sessionData()))
+      .then((r) => { if (!r.ok) log(r.msg); });
+    if (now) save(); else saveTimer = setTimeout(save, 1500);
+  }
+
+  /** Reprend le travail enregistré pour ce calque, s'il y en a un. */
+  async function restoreSession() {
+    const r = await host('stLoadSession', state.shot.compId, state.shot.layerIndex);
+    if (!r.ok || !r.data) return;
+    let d;
+    try { d = JSON.parse(r.data); } catch (e) { return; }
+    const off = state.shot.seqStart, inRange = (f) => f - off >= 0 && f - off < state.n;
+    const byK = (o) => { const out = {}; Object.keys(o || {}).forEach((f) => { if (inRange(+f)) out[+f - off] = o[f]; }); return out; };
+    if (!Array.isArray(d.points) || d.points.length !== 4 || !inRange(d.ref)) return;
+    Object.assign(state, {
+      points: d.points, round: d.round || [0, 0, 0, 0], flip: !!d.flip, mode2d: !!d.mode2d, ref: d.ref - off,
+      Hs: byK(d.Hs), keys: byK(d.keys), conf: byK(d.conf),
+    });
+    state.k = state.ref;
+    $('in-focal').value = d.focal || '';
+    syncControls();
+    changed(true);
+    log('Tracking retrouvé dans le projet.');
   }
 
   // ------------------------------------------------------------------ images
-  /** Vignette d'une image source, décodée une fois et gardée en mémoire (lecture fluide). */
-  function cacheThumb(s) {
-    if (!inCEP || state.thumbs.has(s)) return;
-    state.thumbs.set(s, null);  // en cours
+  /** Vignette d'une image, décodée une fois et gardée en mémoire (lecture fluide). */
+  function cacheThumb(k) {
+    if (!inCEP || state.thumbs.has(k)) return;
+    state.thumbs.set(k, null);  // en cours
     const dir = state.thumbsDir;
-    loadImg(fileUrl(path.join(dir, pad5(s) + '.jpg'))).then((img) => {
+    loadImg(fileUrl(path.join(dir, pad5(k) + '.jpg'))).then((img) => {
       if (dir !== state.thumbsDir) return;  // un autre calque a été chargé entre-temps
       const keep = (bmp) => {
-        state.thumbs.set(s, bmp);
-        if (state.shot && state.shot.frames[state.k] === s && !state.full.has(state.k)) {
+        state.thumbs.set(k, bmp);
+        if (state.k === k && !state.full.has(k)) {
           state.cur = bmp;
           if (state.curThumbMissing) { state.curThumbMissing = false; refresh(); } else draw();
         }
       };
       if (window.createImageBitmap) createImageBitmap(img).then(keep).catch(() => keep(img)); else keep(img);
-    }).catch(() => state.thumbs.delete(s));
+    }).catch(() => state.thumbs.delete(k));
   }
 
   /** Image pleine résolution de l'image k (cache de quelques images). */
@@ -418,8 +421,7 @@
     let img;
     if (!inCEP) img = await loadImg('demo.jpg');
     else {
-      const out = path.join(state.workDir, 'frames', pad5(state.shot.frames[k]) + '.jpg');
-      const r = await state.eng.send({ cmd: 'frame', k, out });
+      const r = await state.eng.send({ cmd: 'frame', k, out: path.join(state.workDir, 'frames', pad5(k) + '.jpg') });
       img = await loadImg(fileUrl(r.path));
     }
     state.full.set(k, img);
@@ -436,7 +438,7 @@
     const f = state.full.get(k);
     if (f) { state.cur = f; state.curThumbMissing = false; }
     else if (inCEP) {
-      const t = state.thumbs.get(state.shot.frames[k]);
+      const t = state.thumbs.get(k);
       if (t) { state.cur = t; state.curThumbMissing = false; } else state.curThumbMissing = true;
       if (!opts.fast && !state.tracking) {
         clearTimeout(fullTimer);
@@ -492,8 +494,19 @@
       B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
       C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
   }
+  const flat = (H) => [H[0][0], H[0][1], H[0][2], H[1][0], H[1][1], H[1][2], H[2][0], H[2][1], H[2][2]];
+  function mul9(a, b) {
+    const o = [];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) o.push(a[3 * i] * b[j] + a[3 * i + 1] * b[3 + j] + a[3 * i + 2] * b[6 + j]);
+    return o.map((x) => x / o[8]);
+  }
+  /** Homographie qui envoie les 4 points src sur les 4 points dst (même ordre). */
+  function fitH(src, dst) {
+    const A = squareHomography(src), B = squareHomography(dst);
+    return A && B ? mul9(flat(B), inv9(flat(A))) : null;
+  }
 
-  /** Contour du rectangle arrondi dans le carré unité (même construction que le moteur) ;
+  /** Contour du rectangle arrondi dans le carré unité (même construction que le moteur et l'effet) ;
    *  radii : arrondi de chaque coin HG, HD, BD, BG en 0..1. */
   function roundedUnit(radii, perArc) {
     const [rh, rd, rb, rg] = radii.map((r) => 0.5 * Math.max(0, Math.min(1, r))), pts = [], n = perArc || 12;
@@ -508,45 +521,9 @@
   }
   const radii = () => state.round.map((r) => r / 100);
   const anyRound = () => state.round.some((r) => r > 0);
+  const isDisc = () => state.round.every((r) => r >= 100);
 
-  /** Contour du rectangle arrondi, vu en perspective (q : coins HG, HD, BD, BG). */
-  function roundedOutline(q) {
-    const H = squareHomography(q);
-    if (!H || !anyRound()) return q;
-    return roundedUnit(radii()).map(([u, v]) => warp(H, u, v));
-  }
-
-  const flat = (H) => [H[0][0], H[0][1], H[0][2], H[1][0], H[1][1], H[1][2], H[2][0], H[2][1], H[2][2]];
-  function mul9(a, b) {
-    const o = [];
-    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) o.push(a[3 * i] * b[j] + a[3 * i + 1] * b[3 + j] + a[3 * i + 2] * b[6 + j]);
-    return o.map((x) => x / o[8]);
-  }
-  /** Homographie qui envoie les points src sur dst (4 points : exacte ; plus : moindres carrés). */
-  function fitH(src, dst) {
-    if (src.length === 4) {
-      const A = squareHomography(src), B = squareHomography(dst);
-      return A && B ? mul9(flat(B), inv9(flat(A))) : null;
-    }
-    const N = Array.from({ length: 8 }, () => new Array(8).fill(0)), r = new Array(8).fill(0);
-    src.forEach(([x, y], i) => {
-      const [u, v] = dst[i];
-      [[[x, y, 1, 0, 0, 0, -u * x, -u * y], u], [[0, 0, 0, x, y, 1, -v * x, -v * y], v]].forEach(([row, b]) => {
-        for (let a = 0; a < 8; a++) { r[a] += row[a] * b; for (let c = 0; c < 8; c++) N[a][c] += row[a] * row[c]; }
-      });
-    });
-    const h = solve(N, r);
-    return h && h.concat([1]);
-  }
-
-  /** Indices des points dans l'ordre du contour (rectangle : HG, HD, BD, BG). */
-  function orderIdx(pts) {
-    if (state.tool !== 'rect' || pts.length !== 4) return pts.map((_, i) => i);
-    const o = orderRect(pts);
-    return o.map((p) => pts.indexOf(p));
-  }
-
-  /** Coins d'un rectangle dans l'ordre haut-gauche, haut-droit, bas-droit, bas-gauche. */
+  /** Coins d'un quadrilatère dans l'ordre haut-gauche, haut-droit, bas-droit, bas-gauche. */
   function orderRect(pts) {
     if (pts.length !== 4) return pts;
     const cx = pts.reduce((a, p) => a + p[0], 0) / 4, cy = pts.reduce((a, p) => a + p[1], 0) / 4;
@@ -555,12 +532,19 @@
     s.forEach((p, i) => { if (p[0] + p[1] < s[k][0] + s[k][1]) k = i; });
     return s.slice(k).concat(s.slice(0, k));
   }
+  /** Indices des points dans l'ordre HG, HD, BD, BG. */
+  function orderIdx(pts) {
+    if (pts.length !== 4) return pts.map((_, i) => i);
+    return orderRect(pts).map((p) => pts.indexOf(p));
+  }
 
   const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   const scale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
   const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-  const norm = (a) => scale(a, 1 / Math.hypot(a[0], a[1], a[2]));
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const len = (a) => Math.hypot(a[0], a[1], a[2]);
+  const norm = (a) => scale(a, 1 / len(a));
 
   /** Focale en pixels : saisie > métadonnées > 50 mm (éq. 24x36, 36 mm = grand côté). */
   function focalPx() {
@@ -574,20 +558,65 @@
   function projectF(X, f) { return [state.W / 2 + f * X[0] / X[2], state.H / 2 + f * X[1] / X[2]]; }
   function project(X) { return projectF(X, focalPx()); }
 
-  const isDisc = () => state.tool === 'rect' && state.round.every((r) => r >= 100);
+  function rotate(v, axis, ang) { // rotation de Rodrigues autour d'un axe unitaire
+    const c = Math.cos(ang), s = Math.sin(ang), k = dot(axis, v);
+    return add(add(scale(v, c), scale(cross(axis, v), s)), scale(axis, k * (1 - c)));
+  }
+
+  // ---- modèle 3D de la surface déduit de ses 4 coins à l'image : X(a, b) = C + a·eu + b·ev, a, b dans [-½, ½]
+  /** 3D : le rectangle dont le quadrilatère est l'image en perspective (angles droits en 3D). */
+  function rectModel(c) {
+    const H = squareHomography(c);
+    if (!H) return null;
+    const f = focalPx(), cx = state.W / 2, cy = state.H / 2;
+    const col = (j) => [(H[0][j] - cx * H[2][j]) / f, (H[1][j] - cy * H[2][j]) / f, H[2][j]];
+    const eu = col(0), ev = col(1);
+    return { C: add(add(scale(eu, 0.5), scale(ev, 0.5)), col(2)), eu, ev };
+  }
+  /** 2D : rectangle face à la caméra ajusté au quadrilatère (centre, angle, largeur, hauteur). */
+  function simModel(c) {
+    const [hg, hd, bd, bg] = c, d2 = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const top = [hd[0] - hg[0], hd[1] - hg[1]], bot = [bd[0] - bg[0], bd[1] - bg[1]];
+    const lt = Math.hypot(...top) || 1, lb = Math.hypot(...bot) || 1;
+    const ang = Math.atan2(top[1] / lt + bot[1] / lb, top[0] / lt + bot[0] / lb);
+    const w = (lt + lb) / 2, h = (d2(hg, bg) + d2(hd, bd)) / 2, f = focalPx();
+    const cx = (hg[0] + hd[0] + bd[0] + bg[0]) / 4, cy = (hg[1] + hd[1] + bd[1] + bg[1]) / 4;
+    const co = Math.cos(ang), si = Math.sin(ang);
+    return { C: [cx - state.W / 2, cy - state.H / 2, f], eu: [w * co, w * si, 0], ev: [-h * si, h * co, 0] };
+  }
+  function modelOf(shown) {
+    if (!shown || shown.length !== 4) return null;
+    const c = orderRect(shown);
+    return state.mode2d ? simModel(c) : rectModel(c);
+  }
+  /** Coins de l'image du modèle, HG, HD, BD, BG. */
+  function cornersOf(m) {
+    return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => project(add(m.C, add(scale(m.eu, a / 2), scale(m.ev, b / 2)))));
+  }
+  /** Repère de la surface : x le long de la largeur, n normale vers l'arrière-plan, y = n × x. */
+  function axesOf(m) {
+    const x = norm(m.eu);
+    let n = norm(cross(m.eu, m.ev));
+    if (dot(n, m.C) < 0) n = scale(n, -1);
+    return { x, y: cross(n, x), n };
+  }
+  /** Normale transmise au moteur : tranche entre les 2 inclinaisons possibles d'un disque. */
+  function chosenNormal() {
+    if (state.mode2d || !isDisc() || !ready()) return null;
+    const m = modelOf(state.points);
+    if (!m) return null;
+    let n = axesOf(m).n;
+    if (state.flip) { const d = norm(m.C); n = norm(add(scale(d, 2 * dot(n, d)), scale(n, -1))); }
+    return n;
+  }
+
+  const ready = () => state.points.length === 4;
   const hasTrack = () => Object.keys(state.Hs).some((k) => +k !== state.ref) || Object.keys(state.keys).length > 0;
 
   // ---- clés de correction : sur une image corrigée à la main, la forme est imposée ; entre
   // deux clés, l'écart entre le suivi et les clés est réparti progressivement (comme Mocha).
   const keyH = (k) => (k === state.ref ? I3 : state.keys[k]);
   const keyFrames = () => [state.ref].concat(Object.keys(state.keys).map(Number)).sort((a, b) => a - b);
-  /** 4 points de la référence qui portent les corrections (rectangle : ses coins ; sinon le cadre de la forme). */
-  function controlQuad() {
-    if (state.tool === 'rect') return orderRect(state.points);
-    const xs = state.points.map((p) => p[0]), ys = state.points.map((p) => p[1]);
-    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
-    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
-  }
   let effCache = { rev: -1, map: new Map() };
   /** Homographie référence -> image k telle qu'utilisée : clé, ou suivi corrigé par les clés voisines. */
   function effH(k) {
@@ -605,7 +634,7 @@
     });
     let H = raw;
     if (kp !== null || kn !== null) {
-      const Q = controlQuad();
+      const Q = orderRect(state.points);
       const delta = (kk) => Q.map((p) => { const a = warp9(keyH(kk), p), b = warp9(state.Hs[kk], p); return [a[0] - b[0], a[1] - b[1]]; });
       const dp = kp !== null ? delta(kp) : null, dn = kn !== null ? delta(kn) : null;
       const w = kp !== null && kn !== null ? (k - kp) / (kn - kp) : kp !== null ? 0 : 1;
@@ -626,66 +655,6 @@
     return ks.length ? (d > 0 ? ks[0] : ks[ks.length - 1]) : null;
   }
 
-  function rotate(v, axis, ang) { // rotation de Rodrigues autour d'un axe unitaire
-    const c = Math.cos(ang), s = Math.sin(ang), k = dot(axis, v);
-    return add(add(scale(v, c), scale(cross(axis, v), s)), scale(axis, k * (1 - c)));
-  }
-
-  /** Modèle 3D du rectangle déduit des 4 coins : X(a, b) = C + a·eu + b·ev, a et b dans [-½, ½]. */
-  function rectModel(points) {
-    if (points.length !== 4) return null;
-    const H = squareHomography(orderRect(points));
-    if (!H) return null;
-    const f = focalPx(), cx = state.W / 2, cy = state.H / 2;
-    const col = (j) => [(H[0][j] - cx * H[2][j]) / f, (H[1][j] - cy * H[2][j]) / f, H[2][j]];
-    const eu = col(0), ev = col(1);
-    return { C: add(add(scale(eu, 0.5), scale(ev, 0.5)), col(2)), eu, ev };
-  }
-
-  function cornersOf(m) {
-    return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => project(add(m.C, add(scale(m.eu, a / 2), scale(m.ev, b / 2)))));
-  }
-
-  /** Repère 3D de la surface sur l'image de référence, déduit de la forme :
-   *  {C, x, y, n (vers l'arrière-plan), P(a, b) point de la surface, L taille des axes, auto}. */
-  function gizmo() {
-    if (!state.W || !ready()) return null;
-    if (state.tool === 'rect') {
-      const m = rectModel(state.points);
-      if (!m) return null;
-      let n = norm(cross(m.eu, m.ev));
-      if (dot(n, m.C) < 0) n = scale(n, -1);
-      if (isDisc() && state.flip) { const d = norm(m.C); n = norm(add(scale(d, 2 * dot(n, d)), scale(n, -1))); }
-      const x = norm(add(m.eu, scale(n, -dot(m.eu, n)))), y = cross(n, x);
-      return { C: m.C, x, y, n, model: m, P: (a, b) => add(m.C, add(scale(m.eu, a), scale(m.ev, b))),
-        L: 0.5 * Math.min(Math.hypot(...m.eu), Math.hypot(...m.ev)) };
-    }
-    const pts = state.points;
-    const center = [pts.reduce((a, p) => a + p[0], 0) / pts.length, pts.reduce((a, p) => a + p[1], 0) / pts.length];
-    const C = ray(center);
-    const n = state.orientManual && state.freeNormal ? state.freeNormal : C;  // auto : face caméra en attendant le mouvement
-    const x = norm(add([1, 0, 0], scale(n, -n[0]))), y = cross(n, x);
-    let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
-    pts.forEach((p) => { // étendue de la forme sur le plan
-      const r = ray(p), D = add(scale(r, dot(n, C) / dot(n, r)), scale(C, -1));
-      a0 = Math.min(a0, dot(D, x)); a1 = Math.max(a1, dot(D, x));
-      b0 = Math.min(b0, dot(D, y)); b1 = Math.max(b1, dot(D, y));
-    });
-    const unit = pts.map((p) => { // contour de la forme en coordonnées 0..1 de la grille
-      const r = ray(p), D = add(scale(r, dot(n, C) / dot(n, r)), scale(C, -1));
-      return [(dot(D, x) - a0) / (a1 - a0), (dot(D, y) - b0) / (b1 - b0)];
-    });
-    return { C, x, y, n, auto: !state.orientManual, L: 0.5 * Math.min(a1 - a0, b1 - b0), unit,
-      P: (a, b) => add(C, add(scale(x, a0 + (a + 0.5) * (a1 - a0)), scale(y, b0 + (b + 0.5) * (b1 - b0)))) };
-  }
-
-  /** Normale à transmettre au moteur (disque : tranche entre les 2 inclinaisons ; forme libre : réglage manuel). */
-  function chosenNormal() {
-    const g = gizmo();
-    if (!g || !(isDisc() || (state.tool === 'free' && state.orientManual))) return null;
-    return g.n;
-  }
-
   /** Forme à l'image k : sur la référence telle quelle, ailleurs transportée par le suivi (null si non trackée). */
   function shapeAt(k) {
     if (k === state.ref || !hasTrack()) return state.points;
@@ -693,17 +662,30 @@
     return h ? state.points.map((p) => warp9(h, p)) : null;
   }
   const editable = () => !state.tracking && !!shapeAt(state.k);
+  /** Sur la référence (ou avant tout suivi) on modifie la forme ; ailleurs, on pose une clé. */
+  const onRef = () => state.k === state.ref || !hasTrack();
+  /** Applique la forme affichée modifiée : sur la référence, la forme ; ailleurs, une clé. */
+  function setShapeAt(shown) {
+    if (onRef()) { state.points = shown.map((p) => p.slice()); return; }
+    const H = fitH(state.points, shown);
+    if (H) state.keys[state.k] = H;
+  }
+  /** Remplace la forme affichée par les coins d'un modèle (gizmo). */
+  function applyModel(m, base) {
+    const idx = orderIdx(base), c = cornersOf(m), shown = base.map((p) => p.slice());
+    idx.forEach((i, j) => { shown[i] = c[j]; });
+    setShapeAt(shown);
+  }
 
   // ------------------------------------------------------------------ annuler / rétablir
   function snapshot() {
     return {
-      tool: state.tool, points: state.points.map((p) => p.slice()), round: state.round.slice(), flip: state.flip,
-      orientManual: state.orientManual, freeNormal: state.freeNormal, ref: state.ref,
-      Hs: state.Hs, keys: state.keys, conf: state.conf, focal: $('in-focal').value, rev: state.rev,
+      points: state.points.map((p) => p.slice()), round: state.round.slice(), flip: state.flip, mode2d: state.mode2d,
+      ref: state.ref, Hs: state.Hs, keys: state.keys, conf: state.conf, focal: $('in-focal').value, rev: state.rev,
     };
   }
   function sameSnap(a, b) {
-    const light = (s) => JSON.stringify([s.tool, s.points, s.round, s.flip, s.orientManual, s.freeNormal, s.ref, s.focal, s.keys]);
+    const light = (s) => JSON.stringify([s.points, s.round, s.flip, s.mode2d, s.ref, s.focal, s.keys]);
     return a.Hs === b.Hs && light(a) === light(b);
   }
   let pendingSnap = null;
@@ -714,7 +696,7 @@
     if (!pendingSnap) return;
     const before = pendingSnap;
     pendingSnap = null;
-    if (sameSnap(before, snapshot())) {  // rien de changé : la 3D reste valable
+    if (sameSnap(before, snapshot())) {  // rien de changé : la pose reste valable
       if (state.pose && state.pose.rev !== state.rev && state.pose.rev === before.rev) state.pose.rev = state.rev;
       return;
     }
@@ -728,8 +710,8 @@
   function restore(s) {
     const refMoved = s.ref !== state.ref;
     Object.assign(state, {
-      tool: s.tool, points: s.points.map((p) => p.slice()), round: s.round.slice(), flip: s.flip,
-      orientManual: s.orientManual, freeNormal: s.freeNormal, ref: s.ref, Hs: s.Hs, keys: s.keys, conf: s.conf,
+      points: s.points.map((p) => p.slice()), round: s.round.slice(), flip: s.flip, mode2d: s.mode2d,
+      ref: s.ref, Hs: s.Hs, keys: s.keys, conf: s.conf,
     });
     $('in-focal').value = s.focal;
     syncControls();
@@ -749,18 +731,20 @@
     restore(state.redo.pop());
   }
 
-  /** Une modification a eu lieu : la 3D est à recalculer. */
-  function changed() {
+  /** Une modification a eu lieu : la pose est à recalculer, le travail à enregistrer. */
+  function changed(noSave) {
     state.rev++;
     scheduleSolve();
+    if (!noSave) scheduleSave();
   }
 
   function syncControls() {
-    document.querySelectorAll('#toolbar [data-tool]').forEach((x) => x.classList.toggle('on', x.dataset.tool === state.tool));
-    $('in-round').value = String(state.selCorner >= 0 ? state.round[state.selCorner] : Math.max(...state.round));
+    document.querySelectorAll('[data-dim]').forEach((b) => b.classList.toggle('on', (b.dataset.dim === '2d') === state.mode2d));
+    document.querySelectorAll('[data-xform]').forEach((b) => b.classList.toggle('on', b.dataset.xform === state.xform));
+    document.querySelectorAll('[data-space]').forEach((b) => b.classList.toggle('on', b.dataset.space === state.space));
   }
 
-  // ------------------------------------------------------------------ éditeur
+  // ------------------------------------------------------------------ vue
   const canvas = $('view');
   const ctx = canvas.getContext('2d');
   const DPR = () => window.devicePixelRatio || 1;
@@ -785,6 +769,7 @@
 
   const toScreen = (p) => [p[0] * state.view.s + state.view.ox, p[1] * state.view.s + state.view.oy];
   const toImage = (x, y) => [(x - state.view.ox) / state.view.s, (y - state.view.oy) / state.view.s];
+  const S3 = (X) => toScreen(project(X));  // point 3D -> écran
 
   function canvasXY(ev) {
     const r = canvas.getBoundingClientRect();
@@ -792,27 +777,21 @@
     return [(ev.clientX - r.left) * k, (ev.clientY - r.top) * k];
   }
 
-  function hitPoint(x, y) {
-    const pts = editable() ? shapeAt(state.k) : null;
-    if (!pts) return -1;
-    const R = 10 * DPR();
-    let best = -1, bd = R;
-    pts.forEach((p, i) => {
-      const [sx, sy] = toScreen(p);
-      const d = Math.hypot(sx - x, sy - y);
-      if (d < bd) { bd = d; best = i; }
-    });
-    return best;
-  }
-
-  function ready() {
-    return state.tool === 'rect' ? state.points.length === 4 : state.points.length >= 3;
-  }
-
   function polyPath(pts, close) {
     ctx.beginPath();
     pts.forEach((p, i) => { const [x, y] = toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
     if (close) ctx.closePath();
+  }
+  function screenPath(pts, close) {
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+    if (close) ctx.closePath();
+  }
+  /** Distance d'un point à un segment, en pixels écran, et position le long du segment (0..1). */
+  function segDist(x, y, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1;
+    const u = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2));
+    return [Math.hypot(a[0] + u * dx - x, a[1] + u * dy - y), u];
   }
 
   let drawQueued = false;
@@ -831,65 +810,70 @@
     if (!img || !state.view) return;
     const v = state.view;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, v.ox, v.oy, state.W * v.s, state.H * v.s);  // vignettes : même cadre que la vidéo
+    ctx.drawImage(img, v.ox, v.oy, state.W * v.s, state.H * v.s);  // vignettes : même cadre que l'image
     drawShape();
   }
 
+  // ------------------------------------------------------------------ forme
+  /** Contour 0..1 qui découpe la grille (arrondis, disque), ou null pour le rectangle simple. */
+  function unitOutline() {
+    if (isDisc()) return Array.from({ length: 48 }, (_, i) => { const a = i / 48 * 2 * Math.PI; return [0.5 + 0.5 * Math.cos(a), 0.5 + 0.5 * Math.sin(a)]; });
+    return anyRound() ? roundedUnit(radii(), 8) : null;
+  }
+
   function drawShape() {
-    const dpr = DPR(), k = state.k;
-    const pts = shapeAt(k);
+    const dpr = DPR(), pts = shapeAt(state.k);
     if (!pts) return;
-    const ok = ready(), canEdit = editable();
-    const rectPts = state.tool === 'rect' && pts.length === 4 ? orderRect(pts) : null;
-    const shape = rectPts && ok ? roundedOutline(rectPts) : pts;
-    if (rectPts && ok && anyRound()) { // rectangle « pointu » en pointillés
-      ctx.setLineDash([4 * dpr, 4 * dpr]);
-      polyPath(rectPts, true);
-      ctx.lineWidth = 1 * dpr;
-      ctx.strokeStyle = 'rgba(240, 192, 64, 0.7)';
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    if (shape.length > 1) {
-      polyPath(shape, ok);
-      ctx.lineWidth = 1.5 * dpr;
-      ctx.strokeStyle = ok ? '#3ce07a' : '#f0c040';
-      ctx.stroke();
-      if (ok) { ctx.fillStyle = 'rgba(60, 224, 122, 0.08)'; ctx.fill(); }
-    }
-    if (ok) drawSurface3D();
-    if (!canEdit && state.tracking) return;
-    const labels = ['HG', 'HD', 'BD', 'BG'];
-    pts.forEach((p, i) => {
-      const [x, y] = toScreen(p);
-      if (rectPts && rectPts.indexOf(p) === state.selCorner) { // coin choisi pour l'arrondi
-        ctx.beginPath();
-        ctx.arc(x, y, 10 * dpr, 0, 2 * Math.PI);
-        ctx.strokeStyle = '#f0c040';
-        ctx.lineWidth = 2 * dpr;
+    const ok = ready(), rect = ok ? orderRect(pts) : null;
+    if (ok) {
+      const H = squareHomography(rect);
+      const outline = H && anyRound() ? roundedUnit(radii()).map(([u, v]) => warp(H, u, v)) : rect;
+      if (anyRound()) { // rectangle « pointu » en pointillés
+        ctx.setLineDash([4 * dpr, 4 * dpr]);
+        polyPath(rect, true);
+        ctx.lineWidth = 1 * dpr;
+        ctx.strokeStyle = 'rgba(240, 192, 64, 0.6)';
         ctx.stroke();
+        ctx.setLineDash([]);
       }
-      ctx.beginPath();
-      ctx.arc(x, y, (i === state.hover ? 6.5 : 5) * dpr, 0, 2 * Math.PI);
-      ctx.fillStyle = i === state.hover ? '#ffffff' : '#3ce07a';
-      ctx.fill();
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 1 * dpr;
+      polyPath(outline, true);
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.strokeStyle = '#3ce07a';
       ctx.stroke();
-      if (rectPts) {
-        ctx.font = `${11 * dpr}px -apple-system, sans-serif`;
-        ctx.fillStyle = '#fff';
-        ctx.fillText(labels[rectPts.indexOf(p)], x + 8 * dpr, y - 8 * dpr);
-      }
-    });
-    if (state.drag && state.drag.kind === 'point') drawLoupe(shapeAt(k)[state.drag.i]);
-    if (state.hoverEdge && !state.drag) { // côté sous la souris : se déplace d'un bloc
-      const [i, j] = state.hoverEdge;
-      polyPath([pts[i], pts[j]]);
+      ctx.fillStyle = 'rgba(60, 224, 122, 0.08)';
+      ctx.fill();
+      drawSurface3D(pts);
+    } else if (pts.length > 1) {
+      polyPath(pts, false);
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.strokeStyle = '#f0c040';
+      ctx.stroke();
+    }
+    if (state.tracking) return;
+    const hv = state.hover || {};
+    if (hv.kind === 'edge' && !state.drag) { // côté sous la souris : se déplace d'un bloc
+      polyPath([pts[hv.i], pts[hv.j]]);
       ctx.lineWidth = 4 * dpr;
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
       ctx.stroke();
     }
+    if (ok && editable()) { drawGizmo(); drawRoundHandles(pts); }
+    pts.forEach((p, i) => {
+      const [x, y] = toScreen(p), hot = hv.kind === 'point' && hv.i === i;
+      ctx.beginPath();
+      ctx.arc(x, y, (hot ? 6.5 : 5) * dpr, 0, 2 * Math.PI);
+      ctx.fillStyle = hot ? '#ffffff' : '#3ce07a';
+      ctx.fill();
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1 * dpr;
+      ctx.stroke();
+      if (rect) {
+        ctx.font = `${11 * dpr}px -apple-system, sans-serif`;
+        ctx.fillStyle = '#fff';
+        ctx.fillText(CORNERS[rect.indexOf(p)], x + 8 * dpr, y - 8 * dpr);
+      }
+    });
+    if (state.drag && state.drag.kind === 'point') drawLoupe(pts[state.drag.i]);
   }
 
   /** Pose calculée à l'image k, si elle est à jour. */
@@ -898,10 +882,10 @@
     return p && p.rev === state.rev && p.poses && p.poses[k] ? p.poses[k] : null;
   }
 
-  /** Grille 3D + axes : la pose calculée si elle est à jour, sinon (référence) celle déduite de la forme. */
-  function drawSurface3D() {
-    const k = state.k, ps = poseAt(k);
-    let P, proj, C, axes, L, disc = isDisc(), outline = null, faint = false, clip = null;
+  /** Grille 3D : la pose calculée si elle est à jour, sinon celle déduite de la forme affichée. */
+  function drawSurface3D(pts) {
+    const ps = poseAt(state.k);
+    let P, proj, C, axes, L;
     if (ps) {
       const R = ps.R, t = ps.t, [w, h] = state.pose.size;
       P = (a, b) => [R[0] * a * w + R[1] * b * h + t[0], R[3] * a * w + R[4] * b * h + t[1], R[6] * a * w + R[7] * b * h + t[2]];
@@ -909,46 +893,46 @@
       C = t;
       axes = [[R[0], R[3], R[6]], [R[1], R[4], R[7]], [-R[2], -R[5], -R[8]]];
       L = 0.5 * Math.min(w, h);
-      disc = state.pose.kind === 'disc';
-      outline = state.pose.outline;
-      clip = outline;
-    } else if (k === state.ref || !hasTrack()) {
-      const g = gizmo();
-      if (!g) return;
-      P = g.P; proj = project; C = g.C; axes = [g.x, g.y, scale(g.n, -1)]; L = g.L; faint = !!g.auto;
-      clip = g.unit || (state.tool === 'rect' && anyRound() && !disc ? roundedUnit(radii(), 8) : null);
-      if (g.unit) outline = g.unit;
-    } else return;
-    if (disc) clip = Array.from({ length: 48 }, (_, i) => { const a = i / 48 * 2 * Math.PI; return [0.5 + 0.5 * Math.cos(a), 0.5 + 0.5 * Math.sin(a)]; });
-    const dpr = DPR();
+    } else {
+      const m = modelOf(pts);
+      if (!m) return;
+      const ax = axesOf(m);
+      P = (a, b) => add(m.C, add(scale(m.eu, a), scale(m.ev, b)));
+      proj = project;
+      C = m.C;
+      axes = [ax.x, ax.y, scale(ax.n, -1)];
+      L = 0.5 * Math.min(len(m.eu), len(m.ev));
+    }
+    const dpr = DPR(), clip = unitOutline();
     ctx.lineWidth = 1 * dpr;
-    ctx.strokeStyle = faint ? 'rgba(0, 220, 255, 0.25)' : 'rgba(0, 220, 255, 0.7)';
+    ctx.strokeStyle = 'rgba(0, 220, 255, 0.7)';
     for (let i = 0; i <= 8; i++) { // grille 8 x 8, découpée à la forme
       const c = i / 8;
       clipLine(clip, true, c).forEach(([s0, s1]) => { polyPath([proj(P(c - 0.5, s0 - 0.5)), proj(P(c - 0.5, s1 - 0.5))]); ctx.stroke(); });
       clipLine(clip, false, c).forEach(([s0, s1]) => { polyPath([proj(P(s0 - 0.5, c - 0.5)), proj(P(s1 - 0.5, c - 0.5))]); ctx.stroke(); });
     }
-    if (disc || outline) {
-      const ring = disc ? Array.from({ length: 73 }, (_, i) => { const a = i / 72 * 2 * Math.PI; return proj(P(0.5 * Math.cos(a), 0.5 * Math.sin(a))); })
-        : outline.map(([u, v]) => proj(P(u - 0.5, v - 0.5)));
-      polyPath(ring, true);
+    if (clip) {
+      polyPath(clip.map(([u, v]) => proj(P(u - 0.5, v - 0.5))), true);
       ctx.lineWidth = 2 * dpr;
       ctx.strokeStyle = 'rgba(0, 220, 255, 0.9)';
       ctx.stroke();
     }
+    if (editable()) return;  // le gizmo montre déjà les axes
     const o = toScreen(proj(C));
     [[axes[0], '#ff4d4d'], [axes[1], '#3ce07a'], [axes[2], '#4aa3ff']].forEach(([axis, col]) => {
-      const e = toScreen(proj(add(C, scale(axis, L))));
-      ctx.lineWidth = 2.5 * dpr;
-      ctx.strokeStyle = col;
-      ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
-      const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 9 * dpr;
-      ctx.beginPath();
-      ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang - 0.4), e[1] - hl * Math.sin(ang - 0.4));
-      ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang + 0.4), e[1] - hl * Math.sin(ang + 0.4));
-      ctx.stroke();
+      drawArrow(o, toScreen(proj(add(C, scale(axis, L)))), col, 2.5 * dpr);
     });
-    if (ringsShown()) drawRings();
+  }
+
+  function drawArrow(o, e, col, width) {
+    const dpr = DPR(), ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 9 * dpr;
+    ctx.lineWidth = width;
+    ctx.strokeStyle = col;
+    ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang - 0.4), e[1] - hl * Math.sin(ang - 0.4));
+    ctx.moveTo(e[0], e[1]); ctx.lineTo(e[0] - hl * Math.cos(ang + 0.4), e[1] - hl * Math.sin(ang + 0.4));
+    ctx.stroke();
   }
 
   /** Morceaux d'une ligne de la grille (u = c si vertical, sinon v = c) à l'intérieur du contour (0..1). */
@@ -964,56 +948,6 @@
     const out = [];
     for (let i = 0; i + 1 < hits.length; i += 2) out.push([hits[i], hits[i + 1]]);
     return out;
-  }
-
-  // ---- gizmo de rotation : un anneau par axe (X rouge, Y vert, Z bleu), comme dans AE
-  const RING_COLORS = { x: '#ff4d4d', y: '#3ce07a', z: '#4aa3ff' };
-  function ringsShown() { return !state.tracking && state.k === state.ref && ready() && !!gizmo(); }
-
-  /** Anneaux en 3D autour du centre de la surface : axe de rotation + points projetés à l'écran. */
-  function rings() {
-    const g = gizmo();
-    if (!g) return [];
-    const r = 1.15 * g.L, out = [];
-    const defs = [['x', g.x, g.y, g.n], ['y', g.y, g.x, g.n]];
-    if (state.tool === 'rect') defs.push(['z', g.n, g.x, g.y]);  // forme libre : tourner dans le plan ne change rien
-    defs.forEach(([id, axis, u, v]) => {
-      const P3 = (a) => add(g.C, add(scale(u, r * Math.cos(a)), scale(v, r * Math.sin(a))));
-      const pts = [];
-      for (let i = 0; i <= 72; i++) pts.push(toScreen(project(P3(i / 72 * 2 * Math.PI))));
-      out.push({ id, axis, P3, pts });
-    });
-    return out;
-  }
-
-  function drawRings() {
-    const dpr = DPR(), active = state.drag && state.drag.kind === 'ring' ? state.drag.id : null;
-    rings().forEach((rg) => {
-      const hot = rg.id === active || (!active && rg.id === state.hoverRing);
-      ctx.beginPath();
-      rg.pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
-      ctx.lineWidth = (hot ? 4 : 2) * dpr;
-      ctx.strokeStyle = RING_COLORS[rg.id];
-      ctx.globalAlpha = active && !hot ? 0.25 : hot ? 1 : 0.75;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    });
-  }
-
-  /** Anneau sous la souris : {ring, i} (i : indice du point le plus proche) ou null. */
-  function hitRing(x, y) {
-    if (!ringsShown()) return null;
-    let best = null, bd = 7 * DPR();
-    rings().forEach((rg) => {
-      for (let i = 0; i < rg.pts.length - 1; i++) {
-        const [ax, ay] = rg.pts[i], [bx, by] = rg.pts[i + 1];
-        const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1;
-        const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2));
-        const d = Math.hypot(ax + u * dx - x, ay + u * dy - y);
-        if (d < bd) { bd = d; best = { ring: rg, i }; }
-      }
-    });
-    return best;
   }
 
   /** Loupe x4 autour du point déplacé, dans le coin opposé. */
@@ -1038,32 +972,144 @@
     ctx.restore();
   }
 
-  /** Sur la référence (ou avant tout suivi) on modifie la forme ; ailleurs, on pose une clé. */
-  const onRef = () => state.k === state.ref || !hasTrack();
-
-  /** Côté (deux points voisins) sous la souris : [i, j] ou null. */
-  function hitEdge(x, y) {
-    const pts = editable() ? shapeAt(state.k) : null;
-    if (!pts || !ready()) return null;
-    const o = orderIdx(pts);
-    let best = null, bd = 7 * DPR();
-    o.forEach((i, n) => {
-      const j = o[(n + 1) % o.length];
-      const [ax, ay] = toScreen(pts[i]), [bx, by] = toScreen(pts[j]);
-      const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1;
-      const u = ((x - ax) * dx + (y - ay) * dy) / L2;
-      if (u < 0.1 || u > 0.9) return;  // près d'un coin : c'est le coin qu'on attrape
-      const d = Math.hypot(ax + u * dx - x, ay + u * dy - y);
-      if (d < bd) { bd = d; best = [i, j]; }
+  // ---- arrondi des coins : une poignée par coin, sur sa diagonale (glisser vers l'intérieur)
+  const UNIT = [[0, 0], [1, 0], [1, 1], [0, 1]], INWARD = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+  function roundHandles(pts) {
+    const H = squareHomography(orderRect(pts));
+    if (!H) return [];
+    const S2 = (u, v) => toScreen(warp(H, u, v));
+    return UNIT.map(([cu, cv], j) => {
+      const [su, sv] = INWARD[j], p0 = S2(cu, cv), p1 = S2(cu + su * 0.1, cv + sv * 0.1);
+      const minR = Math.min(0.25, 16 * DPR() / (Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) / 0.1 || 1));
+      const r = Math.max(0.5 * state.round[j] / 100, minR);
+      return { j, at: S2(cu + su * r, cv + sv * r), H };
     });
-    return best;
+  }
+  function drawRoundHandles(pts) {
+    const dpr = DPR(), hv = state.hover || {};
+    roundHandles(pts).forEach(({ j, at }) => {
+      const hot = (hv.kind === 'round' && hv.j === j) || (state.drag && state.drag.kind === 'round' && state.drag.j === j);
+      ctx.beginPath();
+      ctx.arc(at[0], at[1], (hot ? 5.5 : 4) * dpr, 0, 2 * Math.PI);
+      ctx.fillStyle = state.round[j] > 0 ? '#f0c040' : 'rgba(0, 0, 0, 0.6)';
+      ctx.fill();
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.strokeStyle = hot ? '#ffffff' : '#f0c040';
+      ctx.stroke();
+    });
   }
 
-  /** Applique la forme affichée modifiée : sur la référence, la forme ; ailleurs, une clé. */
-  function setShapeAt(shown) {
-    if (onRef()) { state.points = shown.map((p) => p.slice()); return; }
-    const H = fitH(state.points, shown);
-    if (H) state.keys[state.k] = H;
+  // ---- gizmo de transformation (Déplacer / Tourner / Mettre à l'échelle), axes locaux ou du monde
+  const AXIS_COLORS = { x: '#ff4d4d', y: '#3ce07a', z: '#4aa3ff' };
+  /** Géométrie du gizmo à l'image affichée : modèle, axes, poignées à l'écran. */
+  function gizmo() {
+    const shown = shapeAt(state.k);
+    const m = modelOf(shown);
+    if (!m) return null;
+    const ax = axesOf(m), L = 0.5 * Math.min(len(m.eu), len(m.ev));
+    const world = state.space === 'world';
+    // z vers la caméra (comme les axes de la grille : la flèche bleue pointe vers l'avant de la surface)
+    const A = world ? { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, -1] } : { x: ax.x, y: ax.y, z: scale(ax.n, -1) };
+    const o = S3(m.C);
+    const g = { m, ax, o, handles: [] };
+    const dpr = DPR(), minLen = 40 * dpr;
+    /** Direction à l'écran d'un axe 3D (si l'axe vise la caméra : une diagonale de secours). */
+    const screenDir = (a, length) => {
+      const e = S3(add(m.C, scale(a, length))), v = [e[0] - o[0], e[1] - o[1]], l = Math.hypot(v[0], v[1]);
+      if (l < minLen) return { v: [-0.7 * 60 * dpr, 0.7 * 60 * dpr], ppu: 60 * dpr / length };
+      return { v, ppu: l / length };
+    };
+    if (state.xform === 'move') {
+      ['x', 'y', 'z'].forEach((id) => {
+        if (id === 'z' && state.mode2d) return;
+        const d = screenDir(A[id], L);
+        g.handles.push({ kind: 'axis', id, a: A[id], from: [o[0] + 0.2 * d.v[0], o[1] + 0.2 * d.v[1]], to: [o[0] + d.v[0], o[1] + d.v[1]], dir: d });
+      });
+      g.handles.push({ kind: 'plane', id: 'p', at: o });
+    } else if (state.xform === 'rotate') {
+      const r = 1.15 * L, defs = state.mode2d ? [['z', A.z, A.x, A.y]] : [['x', A.x, A.y, A.z], ['y', A.y, A.x, A.z], ['z', A.z, A.x, A.y]];
+      defs.forEach(([id, axis, u, v]) => {
+        const P3 = (a) => add(m.C, add(scale(u, r * Math.cos(a)), scale(v, r * Math.sin(a))));
+        const pts = [];
+        for (let i = 0; i <= 72; i++) pts.push(S3(P3(i / 72 * 2 * Math.PI)));
+        g.handles.push({ kind: 'ring', id, axis, P3, pts });
+      });
+    } else { // échelle : toujours le long de la largeur et de la hauteur de la surface
+      [['x', ax.x], ['y', ax.y]].forEach(([id, a]) => {
+        const d = screenDir(a, L);
+        g.handles.push({ kind: 'scale', id, from: o, to: [o[0] + d.v[0], o[1] + d.v[1]], dir: d });
+      });
+      g.handles.push({ kind: 'uniform', id: 'u', at: o });
+    }
+    return g;
+  }
+
+  function drawGizmo() {
+    const g = gizmo();
+    if (!g) return;
+    const dpr = DPR(), hv = state.hover || {}, d = state.drag;
+    const same = (a, b) => a && b && a.kind === b.kind && a.id === b.id;
+    g.handles.forEach((h) => {
+      const hot = d ? d.kind === 'gizmo' && same(d.handle, h) : hv.kind === 'gizmo' && same(hv.h, h);
+      if (h.kind === 'axis') {
+        drawArrow(h.from, h.to, AXIS_COLORS[h.id], (hot ? 4 : 2.5) * dpr);
+      } else if (h.kind === 'ring') {
+        screenPath(h.pts);
+        ctx.lineWidth = (hot ? 4 : 2) * dpr;
+        ctx.strokeStyle = AXIS_COLORS[h.id];
+        ctx.globalAlpha = d && !hot ? 0.25 : hot ? 1 : 0.8;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      } else if (h.kind === 'scale') {
+        ctx.lineWidth = 2 * dpr;
+        ctx.strokeStyle = AXIS_COLORS[h.id];
+        screenPath([h.from, h.to]);
+        ctx.stroke();
+        const s = (hot ? 7 : 5) * dpr;
+        ctx.fillStyle = AXIS_COLORS[h.id];
+        ctx.fillRect(h.to[0] - s, h.to[1] - s, 2 * s, 2 * s);
+      } else { // plan (déplacer) ou échelle uniforme : carré au centre
+        const s = (hot ? 8 : 6) * dpr;
+        ctx.fillStyle = hot ? '#ffffff' : 'rgba(255, 255, 255, 0.8)';
+        ctx.fillRect(h.at[0] - s, h.at[1] - s, 2 * s, 2 * s);
+        ctx.lineWidth = 1.5 * dpr;
+        ctx.strokeStyle = '#000';
+        ctx.strokeRect(h.at[0] - s, h.at[1] - s, 2 * s, 2 * s);
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------ souris
+  /** Élément sous la souris, par priorité : coin, poignée d'arrondi, gizmo, côté. */
+  function hitTest(x, y) {
+    if (!editable()) return null;
+    const pts = shapeAt(state.k), R = 10 * DPR();
+    for (let i = 0; i < pts.length; i++) {
+      const [sx, sy] = toScreen(pts[i]);
+      if (Math.hypot(sx - x, sy - y) < R) return { kind: 'point', i };
+    }
+    if (!ready()) return null;
+    for (const h of roundHandles(pts)) if (Math.hypot(h.at[0] - x, h.at[1] - y) < 8 * DPR()) return { kind: 'round', j: h.j, H: h.H };
+    const g = gizmo();
+    if (g) {
+      let best = null, bd = 8 * DPR();
+      g.handles.forEach((h) => {
+        let dist = Infinity;
+        if (h.kind === 'axis') dist = segDist(x, y, h.from, h.to)[0];
+        else if (h.kind === 'scale') dist = Math.max(Math.abs(h.to[0] - x), Math.abs(h.to[1] - y)) - 3 * DPR();
+        else if (h.kind === 'ring') for (let i = 0; i < h.pts.length - 1; i++) dist = Math.min(dist, segDist(x, y, h.pts[i], h.pts[i + 1])[0]);
+        else dist = Math.max(Math.abs(h.at[0] - x), Math.abs(h.at[1] - y)) - 2 * DPR();
+        if (dist < bd) { bd = dist; best = h; }
+      });
+      if (best) return { kind: 'gizmo', h: best, g };
+    }
+    const o = orderIdx(pts);
+    for (let n = 0; n < 4; n++) {
+      const i = o[n], j = o[(n + 1) % 4];
+      const [d, u] = segDist(x, y, toScreen(pts[i]), toScreen(pts[j]));
+      if (d < 7 * DPR() && u > 0.12 && u < 0.88) return { kind: 'edge', i, j };
+    }
+    return null;
   }
 
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1072,55 +1118,79 @@
     if (!state.cur || !state.view) return;
     stopPlay();
     const [x, y] = canvasXY(ev);
-    const hit = ev.button === 0 || ev.button === 2 ? hitPoint(x, y) : -1;
-    if (ev.button === 2 && hit >= 0) { // clic droit sur un point : supprimer
-      act(() => { state.points.splice(hit, 1); });
-      return;
-    }
-    if (ev.button === 1 || ev.button === 2 || state.space || !editable()) {
+    if (ev.button !== 0 || state.spaceKey || !editable()) {
       state.drag = { kind: 'pan', x, y };
       canvas.classList.add('pan');
       return;
     }
-    const edge = hit < 0 && ev.button === 0 ? hitEdge(x, y) : null;
-    const ring = hit < 0 && !edge ? hitRing(x, y) : null;
-    if (ring) { // tourner la surface autour d'un de ses axes
-      const g = gizmo(), rg = ring.ring;
-      const a = ring.i / 72 * 2 * Math.PI, eps = 0.01;
-      const p0 = toScreen(project(rg.P3(a))), p1 = toScreen(project(rg.P3(a + eps)));
-      let tx = (p1[0] - p0[0]) / eps, ty = (p1[1] - p0[1]) / eps;  // pixels par radian le long de l'anneau
-      const tl = Math.hypot(tx, ty);
-      if (tl < 30 * DPR()) { const s = 30 * DPR() / (tl || 1); tx *= s; ty *= s; }  // anneau vu par la tranche
-      beginAction();
-      if (isDisc() && state.flip) state.flip = false;  // la rotation à la main remplace l'inversion
-      state.drag = { kind: 'ring', id: rg.id, axis: rg.axis, x0: x, y0: y, tx, ty, model: g.model, n0: g.n };
-      draw();
+    const hit = hitTest(x, y);
+    const base = (shapeAt(state.k) || []).map((p) => p.slice());
+    if (!hit) {
+      if (state.points.length < 4 && onRef()) { // poser les coins
+        beginAction();
+        state.points.push(toImage(x, y));
+        state.drag = { kind: 'point', i: state.points.length - 1, base: state.points.map((p) => p.slice()) };
+        state.rev++;
+        refresh();
+      } else {
+        state.drag = { kind: 'pan', x, y };
+        canvas.classList.add('pan');
+      }
       return;
     }
     beginAction();
     if (!onRef()) state.keys = Object.assign({}, state.keys);  // nouvel objet : l'historique garde l'ancien
-    const base = (shapeAt(state.k) || []).map((p) => p.slice());
-    if (hit >= 0) {
-      state.drag = { kind: 'point', i: hit, base };
-      if (state.tool === 'rect' && ready()) { state.selCorner = orderRect(base).indexOf(base[hit]); syncControls(); }
-    } else if (edge) {
-      state.drag = { kind: 'edge', edge, base, p0: toImage(x, y) };
-    } else if (!onRef()) {
-      pendingSnap = null;
-      toast('Les points s\'ajoutent sur l\'image de référence. Ici, glissez un point ou un côté : ça pose une clé.', 3500);
-      return;
-    } else {
-      if (state.tool === 'rect' && state.points.length >= 4) {
-        pendingSnap = null;
-        if (state.selCorner >= 0) { state.selCorner = -1; syncControls(); refresh(); }  // clic dans le vide : tous les coins
-        return;
+    if (hit.kind === 'point') state.drag = { kind: 'point', i: hit.i, base };
+    else if (hit.kind === 'edge') state.drag = { kind: 'edge', i: hit.i, j: hit.j, base, p0: toImage(x, y) };
+    else if (hit.kind === 'round') state.drag = { kind: 'round', j: hit.j, Hi: inv9(flat(hit.H)), round0: state.round.slice() };
+    else {
+      const h = hit.h, g = hit.g;
+      const d = { kind: 'gizmo', handle: h, base, m0: g.m, x0: x, y0: y };
+      if (h.kind === 'ring') { // pixels par radian le long de l'anneau, au point saisi
+        let bi = 0, bd = Infinity;
+        h.pts.forEach((p, i) => { const dd = Math.hypot(p[0] - x, p[1] - y); if (dd < bd) { bd = dd; bi = i; } });
+        const a = bi / 72 * 2 * Math.PI, eps = 0.01, p0 = S3(h.P3(a)), p1 = S3(h.P3(a + eps));
+        let tx = (p1[0] - p0[0]) / eps, ty = (p1[1] - p0[1]) / eps;
+        const tl = Math.hypot(tx, ty);
+        if (tl < 30 * DPR()) { const s = 30 * DPR() / (tl || 1); tx *= s; ty *= s; }  // anneau vu par la tranche
+        d.tx = tx; d.ty = ty;
+        if (isDisc() && state.flip) state.flip = false;  // la rotation à la main remplace l'inversion
+      } else if (h.kind === 'plane') { // glisser dans le plan de la surface (local) ou parallèle à l'image (monde)
+        d.nrm = state.space === 'world' || state.mode2d ? [0, 0, 1] : g.ax.n;
+        d.P0 = planePoint(toImage(x, y), d.nrm, g.m.C);
       }
-      state.points.push(toImage(x, y));
-      state.drag = { kind: 'point', i: state.points.length - 1 };
-      state.rev++;
+      state.drag = d;
     }
-    refresh();
+    draw();
   });
+
+  /** Point 3D du plan (normale nrm, passant par C) vu au pixel p. */
+  function planePoint(p, nrm, C) {
+    const r = ray(p), den = dot(nrm, r);
+    return Math.abs(den) < 1e-9 ? null : scale(r, dot(nrm, C) / den);
+  }
+
+  function dragGizmo(d, x, y) {
+    const h = d.handle, m = d.m0, dx = x - d.x0, dy = y - d.y0;
+    let m2 = null;
+    if (h.kind === 'axis') {
+      const v = h.dir.v, l = Math.hypot(v[0], v[1]);
+      m2 = { C: add(m.C, scale(h.a, (dx * v[0] + dy * v[1]) / l / h.dir.ppu)), eu: m.eu, ev: m.ev };
+    } else if (h.kind === 'plane') {
+      const P = planePoint(toImage(x, y), d.nrm, m.C);
+      if (P && d.P0) m2 = { C: add(m.C, sub(P, d.P0)), eu: m.eu, ev: m.ev };
+    } else if (h.kind === 'ring') {
+      const ang = (dx * d.tx + dy * d.ty) / (d.tx * d.tx + d.ty * d.ty);
+      m2 = { C: m.C, eu: rotate(m.eu, h.axis, ang), ev: rotate(m.ev, h.axis, ang) };
+    } else if (h.kind === 'scale') {
+      const v = h.dir.v, f = Math.max(0.05, 1 + (dx * v[0] + dy * v[1]) / (v[0] * v[0] + v[1] * v[1]));
+      m2 = { C: m.C, eu: h.id === 'x' ? scale(m.eu, f) : m.eu, ev: h.id === 'y' ? scale(m.ev, f) : m.ev };
+    } else if (h.kind === 'uniform') {
+      const f = Math.max(0.05, Math.exp((dx - dy) / (150 * DPR())));
+      m2 = { C: m.C, eu: scale(m.eu, f), ev: scale(m.ev, f) };
+    }
+    if (m2) applyModel(m2, d.base);
+  }
 
   window.addEventListener('mousemove', (ev) => {
     if (!state.view) return;
@@ -1132,23 +1202,22 @@
       p[1] = Math.max(0, Math.min(state.H, p[1]));
       const shown = d.base.map((q) => q.slice());
       shown[d.i] = p;
-      setShapeAt(shown);
+      if (shown.length === 4) setShapeAt(shown); else state.points = shown;
       state.rev++;
       draw();
     } else if (d && d.kind === 'edge') {
-      const p = toImage(x, y), dx = p[0] - d.p0[0], dy = p[1] - d.p0[1];
-      const shown = d.base.map((q, i) => (d.edge.indexOf(i) >= 0 ? [q[0] + dx, q[1] + dy] : q.slice()));
-      setShapeAt(shown);
+      const p = toImage(x, y), ex = p[0] - d.p0[0], ey = p[1] - d.p0[1];
+      setShapeAt(d.base.map((q, i) => (i === d.i || i === d.j ? [q[0] + ex, q[1] + ey] : q.slice())));
       state.rev++;
       draw();
-    } else if (d && d.kind === 'ring') {
-      const ang = ((x - d.x0) * d.tx + (y - d.y0) * d.ty) / (d.tx * d.tx + d.ty * d.ty);
-      if (d.model) { // rectangle / disque : les coins suivent la rotation
-        state.points = cornersOf({ C: d.model.C, eu: rotate(d.model.eu, d.axis, ang), ev: rotate(d.model.ev, d.axis, ang) });
-      } else {
-        state.freeNormal = norm(rotate(d.n0, d.axis, ang));
-        state.orientManual = true;
-      }
+    } else if (d && d.kind === 'round') { // position de la souris projetée sur la diagonale du coin
+      const [u, v] = warp9(d.Hi, toImage(x, y)), [cu, cv] = UNIT[d.j], [su, sv] = INWARD[d.j];
+      const val = Math.round(200 * Math.max(0, Math.min(0.5, ((u - cu) * su + (v - cv) * sv) / 2)));
+      state.round = ev.shiftKey ? [val, val, val, val] : d.round0.map((r, j) => (j === d.j ? val : r));
+      state.rev++;
+      refresh();
+    } else if (d && d.kind === 'gizmo') {
+      dragGizmo(d, x, y);
       state.rev++;
       draw();
     } else if (d && d.kind === 'pan') {
@@ -1158,14 +1227,11 @@
       d.y = y;
       draw();
     } else if (ev.target === canvas) {
-      const h = hitPoint(x, y);
-      const e = h < 0 ? hitEdge(x, y) : null;
-      const r = h < 0 && !e ? hitRing(x, y) : null;
-      const rid = r ? r.ring.id : null;
-      canvas.style.cursor = rid ? 'grab' : e ? 'move' : '';
-      if (h !== state.hover || rid !== state.hoverRing || String(e) !== String(state.hoverEdge)) {
-        state.hover = h; state.hoverRing = rid; state.hoverEdge = e; draw();
-      }
+      const h = hitTest(x, y);
+      canvas.style.cursor = !h ? '' : h.kind === 'edge' || (h.kind === 'gizmo' && h.h.kind === 'plane') ? 'move'
+        : h.kind === 'point' ? 'pointer' : 'grab';
+      const key = (o) => (o ? [o.kind, o.i, o.j, o.h && o.h.kind, o.h && o.h.id].join() : '');
+      if (key(h) !== key(state.hover)) { state.hover = h; draw(); }
     }
   });
 
@@ -1191,7 +1257,9 @@
 
   canvas.addEventListener('dblclick', (ev) => {
     const [x, y] = canvasXY(ev);
-    if (hitPoint(x, y) < 0) fitView();
+    const h = hitTest(x, y);
+    if (h && h.kind === 'round') { act(() => { state.round = state.round.map((r, j) => (j === h.j ? 0 : r)); }); return; }
+    if (!h) fitView();
   });
 
   // ------------------------------------------------------------------ clavier
@@ -1199,8 +1267,11 @@
     const mod = ev.metaKey || ev.ctrlKey;
     if (mod && (ev.key === 'z' || ev.key === 'Z')) { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
     if (mod && (ev.key === 'y' || ev.key === 'Y')) { ev.preventDefault(); redo(); return; }
-    if (ev.target.tagName === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox') return;
-    if (ev.code === 'Space') { state.space = true; canvas.classList.add('pan'); ev.preventDefault(); }
+    if (ev.target.tagName === 'INPUT' && ev.target.type !== 'checkbox') return;
+    if (ev.code === 'Space') { state.spaceKey = true; canvas.classList.add('pan'); ev.preventDefault(); }
+    const k = ev.key.toLowerCase();
+    if (!mod && (k === 'w' || k === 'e' || k === 'r')) { setXform({ w: 'move', e: 'rotate', r: 'scale' }[k]); ev.preventDefault(); }
+    if (!mod && k === 'x') { setSpace(state.space === 'local' ? 'world' : 'local'); ev.preventDefault(); }
     if ((ev.key === 'Backspace' || ev.key === 'Delete') && editable() && onRef() && state.points.length) {
       act(() => { state.points.pop(); });
       ev.preventDefault();
@@ -1212,46 +1283,32 @@
     }
   });
   window.addEventListener('keyup', (ev) => {
-    if (ev.code === 'Space') { state.space = false; if (!state.drag) canvas.classList.remove('pan'); }
+    if (ev.code === 'Space') { state.spaceKey = false; if (!state.drag) canvas.classList.remove('pan'); }
   });
   window.addEventListener('resize', draw);
   if (inCEP) {
-    // ⌘Z / ⇧⌘Z / ←→ : pour le panneau plutôt que pour AE (codes de touches macOS)
+    // raccourcis pour le panneau plutôt que pour AE (codes de touches macOS) : ⌘Z, ⇧⌘Z, ←, →,
+    // effacement, espace, W, E, R, X
     try {
       window.__adobe_cep__.registerKeyEventsInterest(JSON.stringify([
         { keyCode: 6, metaKey: true }, { keyCode: 6, metaKey: true, shiftKey: true },
         { keyCode: 123 }, { keyCode: 124 }, { keyCode: 123, shiftKey: true }, { keyCode: 124, shiftKey: true },
-        { keyCode: 51 }, { keyCode: 117 }, { keyCode: 49 },
+        { keyCode: 51 }, { keyCode: 117 }, { keyCode: 49 }, { keyCode: 13 }, { keyCode: 14 }, { keyCode: 15 }, { keyCode: 7 },
       ]));
     } catch (e) { /* ancienne version de CEP */ }
   }
 
-  // ------------------------------------------------------------------ outils
-  document.querySelectorAll('#toolbar [data-tool]').forEach((b) => b.addEventListener('click', () => {
-    if (state.tracking || b.dataset.tool === state.tool) return;
-    act(() => {
-      state.tool = b.dataset.tool;
-      state.points = [];
-      state.Hs = {};
-      state.keys = {};
-      state.conf = {};
-      state.selCorner = -1;
-    });
+  // ------------------------------------------------------------------ barre d'outils
+  function setXform(x) { state.xform = x; remember('xform', x); syncControls(); refresh(); }
+  function setSpace(s) { state.space = s; remember('space', s); syncControls(); refresh(); }
+  document.querySelectorAll('[data-xform]').forEach((b) => b.addEventListener('click', () => setXform(b.dataset.xform)));
+  document.querySelectorAll('[data-space]').forEach((b) => b.addEventListener('click', () => setSpace(b.dataset.space)));
+  document.querySelectorAll('[data-dim]').forEach((b) => b.addEventListener('click', () => {
+    if (state.tracking || (b.dataset.dim === '2d') === state.mode2d) return;
+    act(() => { state.mode2d = b.dataset.dim === '2d'; });
     syncControls();
   }));
-  const round = $('in-round');
-  round.addEventListener('pointerdown', beginAction);
-  round.addEventListener('input', () => {
-    beginAction();
-    const r = state.round.slice();
-    if (state.selCorner >= 0) r[state.selCorner] = +round.value; else r.fill(+round.value);
-    state.round = r;
-    state.rev++;
-    refresh();
-  });
-  round.addEventListener('change', () => { endAction(); refresh(); });
   $('btn-flip').addEventListener('click', () => act(() => { state.flip = !state.flip; }));
-  $('btn-orient-auto').addEventListener('click', () => act(() => { state.orientManual = false; state.freeNormal = null; }));
   const focalIn = $('in-focal');
   focalIn.addEventListener('focus', beginAction);
   focalIn.addEventListener('input', () => { beginAction(); state.rev++; refresh(); });
@@ -1261,7 +1318,7 @@
   window.addEventListener('click', () => $('clear-menu').classList.add('hidden'));
   $('btn-clear-track').addEventListener('click', () => act(() => { state.Hs = {}; state.keys = {}; state.conf = {}; }));
   $('btn-clear-all').addEventListener('click', () => act(() => {
-    state.points = []; state.Hs = {}; state.keys = {}; state.conf = {}; state.selCorner = -1;
+    state.points = []; state.round = [0, 0, 0, 0]; state.Hs = {}; state.keys = {}; state.conf = {};
   }));
   // clé sur l'image courante : la poser (fige la forme affichée) ou la retirer
   $('btn-key').addEventListener('click', () => {
@@ -1279,31 +1336,23 @@
 
   function refresh() {
     const n = state.points.length, k = state.k, tracked = hasTrack();
+    const tool = { move: 'Déplacer', rotate: 'Tourner', scale: 'Mettre à l\'échelle' }[state.xform];
     let hint = '';
     if (state.tracking) hint = 'Suivi en cours : arrêtez (■) dès que la zone verte décroche, ce qui est déjà tracké est gardé.';
     else if (!state.cur) hint = '';
     else if (state.scrubbing && !tracked) hint = 'Relâchez sur une image nette où la surface est bien visible : elle devient la référence.';
     else if (k !== state.ref && tracked && !shapeAt(k)) hint = 'Image non trackée : trackez jusqu\'ici depuis une image trackée.';
-    else if (k !== state.ref && tracked) hint = state.keys[k] ? 'Clé : la forme est imposée ici ; le suivi est corrigé progressivement jusqu\'aux clés voisines. Retracker depuis ici s\'arrête à la clé suivante.'
-      : 'Glissez un point ou un côté pour corriger cette image : ça pose une clé (◆). Rotation : sur l\'image de référence (repère jaune).';
-    else if (state.tool === 'rect') {
-      hint = n < 4 ? `Cliquez les 4 coins (${n}/4). Arrondi à fond = disque.`
-        : isDisc() ? 'Disque : ajustez les coins pour que le cercle épouse le bord.'
-          : anyRound() ? 'Placez les coins là où les bords droits se rejoindraient (pointillés).'
-            : 'Prêt à tracker.';
-      if (n === 4) hint += ' Cliquez un coin pour l\'arrondir seul, glissez un côté pour le déplacer, les anneaux pour tourner la surface.';
-    } else {
-      hint = n < 3 ? `Cliquez le contour d'une zone plane (${n}/3 min.).`
-        : state.orientManual ? 'Grille alignée à la main : elle sera utilisée telle quelle.'
-          : 'Orientation déduite du mouvement. Pour l\'imposer, glissez les anneaux jusqu\'à aligner la grille sur la scène.';
+    else if (n < 4) hint = `Cliquez les 4 coins de la surface (${n}/4).`;
+    else {
+      hint = k !== state.ref && tracked
+        ? (state.keys[k] ? 'Clé : la forme est imposée ici, le suivi est corrigé jusqu\'aux clés voisines. ' : 'Toute retouche ici pose une clé (◆). ')
+        : (isDisc() ? 'Disque. ' : '');
+      hint += `${tool} : glissez le gizmo (W/E/R ; X : axes ${state.space === 'local' ? 'locaux' : 'du monde'}). ` +
+        'Coins et côtés se glissent ; les petits ronds jaunes arrondissent un coin (Maj : les 4, double-clic : aucun).';
     }
     $('hint').textContent = hint;
-    const rv = state.selCorner >= 0 ? state.round[state.selCorner] : Math.max(...state.round);
-    $('round-val').textContent = isDisc() ? 'disque' : (state.selCorner >= 0 ? ['HG', 'HD', 'BD', 'BG'][state.selCorner] + ' ' : '') + `${rv} %`;
-    $('round-wrap').classList.toggle('hidden', state.tool !== 'rect');
-    $('btn-flip').classList.toggle('hidden', !isDisc());
+    $('btn-flip').classList.toggle('hidden', !isDisc() || state.mode2d);
     $('btn-flip').classList.toggle('on', state.flip);
-    $('orient-wrap').classList.toggle('hidden', !(state.tool === 'free' && state.orientManual));
     $('btn-undo').disabled = !state.undo.length || !!state.tracking;
     $('btn-redo').disabled = !state.redo.length || !!state.tracking;
     $('btn-clear-track').disabled = !tracked;
@@ -1319,22 +1368,19 @@
       const running = state.tracking && state.tracking.btn === b;
       b.classList.toggle('running', !!running);
       b.disabled = state.tracking ? !running : !canStart;
-      if (!b.dataset.icon) b.dataset.icon = b.innerHTML;
+      if (!b.dataset.icon) { b.dataset.icon = b.innerHTML; b.dataset.title = b.title; }
       const mode = running ? 'stop' : 'go';
       if (b.dataset.mode !== mode) {
         b.dataset.mode = mode;
         b.innerHTML = running ? '<svg class="solid" viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></svg>' : b.dataset.icon;
-        b.title = running ? 'Arrêter le suivi (les images déjà trackées sont gardées)' : b.dataset.title || b.title;
+        b.title = running ? 'Arrêter le suivi (les images déjà trackées sont gardées)' : b.dataset.title;
       }
-      if (!b.dataset.title) b.dataset.title = b.title;
     });
     $('btn-play').disabled = !state.n || !!state.tracking;
     $('play-path').setAttribute('d', state.playTimer ? 'M7 5h3.5v14H7zM13.5 5H17v14h-3.5z' : 'M7 5l12 7-12 7z');
-    if (state.shot) {
-      $('frame-label').textContent = `${state.shot.seqStart + k}` + (k === state.ref ? ' · réf' : '');
-    }
+    if (state.shot) $('frame-label').textContent = `${state.shot.seqStart + k}` + (k === state.ref ? ' · réf' : '');
     const badge = state.tracking ? `Suivi… image ${state.shot.seqStart + k}`
-      : state.curThumbMissing ? 'Vignettes en préparation…'
+      : state.curThumbMissing ? 'Images en préparation…'
         : (tracked && !shapeAt(k)) ? 'Non trackée' : '';
     $('badge').textContent = badge;
     $('badge').classList.toggle('hidden', !badge);
@@ -1358,10 +1404,9 @@
     const p = TL_PAD * dpr, cw = Math.max(1, (w - 2 * p) / Math.max(1, state.n - 1));
     tctx.fillStyle = '#1b1b1b';
     tctx.fillRect(0, 0, w, h);
-    // vignettes prêtes (bande grise en bas)
+    // images chargées (bande grise en bas)
     tctx.fillStyle = '#4a4a4a';
-    const src = state.shot.frames;
-    for (let k = 0; k < state.n; k++) if (state.loaded.has(src[k])) tctx.fillRect(tlX(k, w) - cw / 2, h - 4 * dpr, cw + 0.5, 3 * dpr);
+    state.loaded.forEach((k) => tctx.fillRect(tlX(k, w) - cw / 2, h - 4 * dpr, cw + 0.5, 3 * dpr));
     // images trackées (couleur selon la confiance)
     const y0 = 9 * dpr, y1 = h - 9 * dpr;
     new Set(Object.keys(state.Hs).concat(Object.keys(state.keys))).forEach((key) => {
@@ -1380,9 +1425,8 @@
       tctx.strokeStyle = '#000'; tctx.lineWidth = 1 * dpr; tctx.stroke();
     });
     // tête de lecture
-    const xk = tlX(state.k, w);
     tctx.fillStyle = '#ffffff';
-    tctx.fillRect(xk - 1 * dpr, 0, 2 * dpr, h);
+    tctx.fillRect(tlX(state.k, w) - 1 * dpr, 0, 2 * dpr, h);
   }
 
   function tlFrame(ev) {
@@ -1449,7 +1493,7 @@
     state.conf = Object.assign({}, state.conf, { [state.ref]: 1 });
     state.tracking = { btn, cancel: false };
     refresh();
-    const pts = state.tool === 'rect' ? orderRect(state.points) : state.points;
+    const pts = orderRect(state.points);
     try {
       for (const d of dir === 0 ? [1, -1] : [dir]) {
         if (state.tracking.cancel) break;
@@ -1458,7 +1502,7 @@
         if (dir === 0 && state.k !== k0) showFrame(k0, { fast: true });
         const r = await state.eng.send({
           cmd: 'track', k: k0, dir: d, count, ref: state.ref, H: H0, Hprev: effH(k0 - d) || null,
-          tool: state.tool, points: pts, roundness: radii(),
+          points: pts, roundness: radii(),
         });
         if (r.reason === 'lost') {
           toast(`Suivi perdu à l'image ${state.shot.seqStart + r.last + d} : corrigez la forme (clé) ou reprenez depuis une autre image.`, 5000);
@@ -1478,7 +1522,7 @@
   }
   document.querySelectorAll('.trk').forEach((b) => b.addEventListener('click', () => trackRun(b)));
 
-  // ------------------------------------------------------------------ 3D
+  // ------------------------------------------------------------------ pose
   let solveTimer = null;
   function scheduleSolve() {
     clearTimeout(solveTimer);
@@ -1486,21 +1530,25 @@
     solveTimer = setTimeout(runSolve, 350);
   }
 
+  /** Homographies de toutes les images trackées, corrigées par les clés. */
+  function usedHs() {
+    const out = {};
+    new Set(Object.keys(state.Hs).concat(Object.keys(state.keys))).forEach((key) => { const H = effH(+key); if (H) out[key] = H; });
+    out[state.ref] = I3;
+    return out;
+  }
+
   async function runSolve() {
     if (state.tracking || state.drag || !state.eng || !ready() || !hasTrack()) return;
     if (state.solving) { scheduleSolve(); return; }
     const rev = state.rev;
-    const pts = state.tool === 'rect' ? orderRect(state.points) : state.points;
-    const normal = chosenNormal();
     const focal = parseFloat($('in-focal').value);
     state.solving = true;
     refresh();
     try {
       const r = await state.eng.send({
-        cmd: 'solve', Hs: usedHs(), conf: state.conf, ref: state.ref, tool: state.tool, points: pts,
-        roundness: radii(), normal, focal_mm: focal > 0 ? focal : null,
-        out: inCEP ? path.join(state.workDir, `apply_${rev}.jsx`) : '',
-        name: state.shot.footageName.replace(/\.[^.]+$/, ''),
+        cmd: 'solve', Hs: usedHs(), conf: state.conf, ref: state.ref, points: orderRect(state.points),
+        roundness: radii(), normal: chosenNormal(), focal_mm: focal > 0 ? focal : null, mode: state.mode2d ? '2d' : '3d',
       });
       if (rev === state.rev) { state.pose = Object.assign(r, { rev }); showSummary(); }
     } catch (e) {
@@ -1512,14 +1560,6 @@
     }
   }
 
-  /** Homographies de toutes les images trackées, corrigées par les clés. */
-  function usedHs() {
-    const out = {};
-    new Set(Object.keys(state.Hs).concat(Object.keys(state.keys))).forEach((key) => { const H = effH(+key); if (H) out[key] = H; });
-    out[state.ref] = I3;
-    return out;
-  }
-
   function showSummary() {
     const ul = $('summary');
     ul.innerHTML = '';
@@ -1529,9 +1569,9 @@
     const keys = Object.keys(usedHs()).map(Number).sort((a, b) => a - b);
     const off = state.shot.seqStart, nk = Object.keys(state.keys).length;
     add('ok', `${keys.length}/${state.n} images trackées (${off + keys[0]}–${off + keys[keys.length - 1]})` +
-      (nk ? `, ${nk} clé${nk > 1 ? 's' : ''} de correction` : ''));
+      (nk ? `, ${nk} clé${nk > 1 ? 's' : ''} de correction` : '') + (state.mode2d ? ' · 2D' : ''));
     if (!/métadonnées|saisie/.test(r.focal_source)) add('warn', `Focale : ${r.focal_source}`);
-    if (r.error_mean !== null && r.error_mean !== undefined) {
+    if (r.error_mean !== null && r.error_mean !== undefined && !state.mode2d) {
       add(r.error_mean < 1.5 ? 'ok' : 'warn', `Calage 3D sur la 2D : ${r.error_mean.toFixed(2)} px en moyenne (max ${r.error_max.toFixed(1)})`);
     }
   }
@@ -1542,32 +1582,34 @@
     if (!r || !r.ae || !inCEP) return;
     $('btn-apply').disabled = true;
     const out = await host('stApplyTracking', state.shot.compId, state.shot.layerIndex, r.ae);
+    scheduleSave(true);
     refresh();
     const box = $('apply-msg');
     box.classList.remove('hidden');
     box.style.color = out.ok ? '' : 'var(--err)';
     box.textContent = out.ok
       ? `Tracking appliqué à l'effet : ${out.frames} images clés. Sélectionnez l'effet pour voir la grille dans la compo ; ` +
-        'ses boutons « Créer » ajoutent un null, un solide ou un texte posés sur la surface.'
+        'sa section « Créer » ajoute un null, un solide ou un texte posés sur la surface.'
       : out.msg;
   });
 
   $('btn-load').addEventListener('click', () => host('stGetSelection').then(loadShot));
 
   // ------------------------------------------------------------------ démarrage
+  state.xform = recall('xform', 'move');
+  state.space = recall('space', 'local');
+  syncControls();
   if (!inCEP) {
     // aperçu dans un navigateur : moteur simulé, toutes les images = demo.jpg
     $('shot-empty').textContent = 'Mode démo (hors After Effects) : suivi simulé.';
     $('btn-load').disabled = true;
     loadImg('demo.jpg').then((img) => {
       state.W = img.width; state.H = img.height; state.n = 60;
-      state.shot = { seqStart: 0, compFps: 25, frames: Array.from({ length: 60 }, (_, i) => i), footageName: 'demo' };
+      state.shot = { seqStart: 0, compFps: 25 };
       state.k = state.ref = 20;
-      for (let i = 0; i < 60; i++) state.loaded.add(i);
+      for (let i = 0; i < 60; i++) { state.loaded.add(i); state.full.set(i, img); }
       state.eng = demoEngine(onEngineEvent);
-      state.full.set(20, img);
       state.cur = img;
-      for (let i = 0; i < 60; i++) state.full.set(i, img);
       enable('s-surface', true);
       fitView();
       refresh();

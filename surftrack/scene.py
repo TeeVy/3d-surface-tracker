@@ -1,15 +1,9 @@
-"""Analyse de la scène autour de la surface.
+"""Analyse de la scène autour de la surface : qui bouge ?
 
-1. Qui bouge ? Si le décor autour de la surface bouge de la même façon qu'elle,
-   la surface est fixe dans la pièce et c'est la caméra qui bouge ; sinon c'est
-   l'objet. Ça détermine ce qui sera animé dans After Effects (la caméra ou la
-   surface), ce qui compte dès qu'on ajoute d'autres éléments 3D à la scène.
-
-2. Orientation d'une surface de forme libre. Sans forme connue (rectangle,
-   disque), l'inclinaison se lit dans le mouvement : la façon dont la
-   perspective de la surface se déforme d'une image à l'autre dépend de son
-   orientation (décomposition de l'homographie). Il faut pour cela que la caméra
-   ou l'objet se déplace un peu (pas seulement tourner sur place).
+Si le décor autour de la surface bouge de la même façon qu'elle, la surface est
+fixe dans la pièce et c'est la caméra qui bouge ; sinon c'est l'objet. Ça
+détermine ce qui sera animé dans After Effects (la caméra ou la surface) quand le
+script de la ligne de commande est utilisé.
 """
 
 import cv2
@@ -80,45 +74,3 @@ def detect_motion_mode(frames, track_scale, homographies, poly, pose, width, hei
     if ep_e < 0.35 * st_e:
         return "camera", f"le décor suit le mouvement de caméra déduit de la surface (écart {ep_e:.1f} px contre {st_e:.1f} px)"
     return "object", f"le décor ne suit pas un mouvement de caméra commun (écart {ep_e:.1f} px contre {st_e:.1f} px)"
-
-
-def estimate_plane_normal(homographies, focals, width, height, ref_index, poly, max_frames=60):
-    """Normale du plan (repère caméra de référence, orientée vers l'arrière-plan)
-    déduite du mouvement. Renvoie (normale, fiable, explication)."""
-    def K(f):
-        return np.array([[f, 0, width / 2], [0, f, height / 2], [0, 0, 1]])
-
-    Kr_inv = np.linalg.inv(K(focals[ref_index]))
-    rays = np.column_stack([poly, np.ones(len(poly))]) @ Kr_inv.T
-    valid = [i for i in np.flatnonzero(np.isfinite(homographies).all(axis=(1, 2))) if i != ref_index]
-    if not valid:
-        return np.array([0.0, 0, 1]), False, "aucune autre image trackée"
-    idx = valid[::max(1, len(valid) // max_frames)]
-    cands, weights = [], []
-    for i in idx:
-        Hn = np.linalg.inv(K(focals[i])) @ homographies[i] @ np.linalg.inv(Kr_inv)
-        Hn /= np.linalg.svd(Hn, compute_uv=False)[1]
-        n_sol, Rs, ts, ns = cv2.decomposeHomographyMat(Hn, np.eye(3))
-        for t, n in zip(ts, ns):
-            if np.linalg.norm(n) < 1e-9:
-                continue
-            n = n.ravel() / np.linalg.norm(n)
-            if np.all(rays @ n > 0):  # plan devant la caméra
-                cands.append(n)
-                weights.append(float(np.linalg.norm(t)))  # déplacement / distance : force de la parallaxe
-    if not cands:
-        return np.array([0.0, 0, 1]), False, "aucune solution physique"
-    cands, weights = np.array(cands), np.array(weights)
-    close = (cands @ cands.T) > np.cos(np.radians(8))
-    score = close @ weights
-    best = int(np.argmax(score))
-    members = close[best]
-    n = (cands[members] * weights[members, None]).sum(axis=0)
-    n /= np.linalg.norm(n)
-    share = score[best] / weights.sum()          # la vraie normale revient à chaque image
-    parallax = float(np.median(weights[members]))
-    reliable = share > 0.35 and parallax > 0.02
-    tilt = np.degrees(np.arccos(np.clip(n[2], -1, 1)))
-    why = (f"inclinaison {tilt:.0f}° déduite du mouvement (cohérence {100 * share:.0f} %, "
-           f"parallaxe {100 * parallax:.1f} %)")
-    return n, bool(reliable), why

@@ -1,16 +1,19 @@
 """Session du panneau : un processus qui garde le plan en mémoire.
 
-Au démarrage, une seule passe de décodage charge les images de la séquence (en
-niveaux de gris, à l'échelle du tracking) et écrit les vignettes de la timeline.
+Les images sont celles du calque tracké telles qu'elles arrivent à l'effet
+« 3D Surface Tracker » : After Effects les calcule et les envoie en mémoire par le
+pont STBridge (voir bridge.py). Au démarrage, une passe charge toutes les images de
+la séquence (niveaux de gris, à l'échelle du tracking) et écrit les vignettes de la
+timeline, en commençant par l'image de référence.
+
 Le panneau envoie ensuite des commandes JSON, une par ligne, sur l'entrée standard :
 
   {"id": 1, "cmd": "frame", "k": 12, "out": "/…/f.jpg"}         image pleine résolution
   {"id": 2, "cmd": "track", "k": 12, "dir": 1, "count": 0, …}     suivi (count 0 : jusqu'au bout)
   {"cmd": "stop"}                                                  arrête le suivi en cours
-  {"id": 3, "cmd": "solve", "Hs": {"12": [9 nombres]}, …}         pose 3D + script AE
+  {"id": 3, "cmd": "solve", "Hs": {"12": [9 nombres]}, …}         pose 3D (ou 2D) par image
 
-La séquence est celle de la compo : l'image k de la séquence montre l'image src[k]
-du fichier (remappages et précomps déjà résolus par After Effects).
+L'image k de la séquence est l'image k du calque dans la compo (instant times[k]).
 Le panneau garde les homographies (référence -> image k) : il peut annuler, et le
 moteur reste sans état autre que les images.
 """
@@ -26,13 +29,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .ae_export import build_ae_data, write_jsx
+from .ae_export import build_ae_data
+from .bridge import Bridge
 from .geometry import warp_points
 from .metadata import read_lens_info
 from .pipeline import Result, choose_focal, solve
-from .surface import DiscSurface, FreeSurface, RectSurface
+from .pose import solve_poses_2d
+from .surface import DiscSurface, RectSurface
 from .tracker import PlanarTracker, TrackResult
-from .video import iter_bgr, read_frame_bgr, video_size
 
 _lock = threading.Lock()
 
@@ -44,14 +48,20 @@ def emit(**kw):
         sys.stdout.flush()
 
 
-def make_surface(c):
+def _radii(c):
+    return np.broadcast_to(np.asarray(c.get("roundness", 0), float), (4,))
+
+
+def make_surface(c, for_pose=False):
+    """Rectangle (4 coins HG, HD, BD, BG) aux coins éventuellement arrondis. Pour la pose 3D,
+    les 4 coins arrondis à fond font un disque (son bord donne l'inclinaison)."""
     pts = np.asarray(c["points"], float).reshape(-1, 2)
-    if c["tool"] == "rect":
-        if len(pts) != 4:
-            raise ValueError("Un rectangle se désigne par exactement 4 coins.")
-        r = np.broadcast_to(np.asarray(c.get("roundness", 0), float), (4,))
-        return DiscSurface.from_square(pts) if np.all(r >= 0.999) else RectSurface(pts, r)
-    return FreeSurface(pts)
+    if len(pts) != 4:
+        raise ValueError("La surface se désigne par exactement 4 coins.")
+    r = _radii(c)
+    if for_pose and np.all(r >= 0.999):
+        return DiscSurface.from_square(pts)
+    return RectSurface(pts, r)
 
 
 def _area(poly):
@@ -64,22 +74,19 @@ def _mat(v):
 
 
 class Session:
-    def __init__(self, video, seq, thumbs_dir, thumb_side=720):
-        self.video = video
-        self.src = np.asarray(seq["src"], int)
-        # rendu d'AE (effets, stabilisation…) : la focale vient du rush d'origine, image par image
-        self.lens_video = seq.get("lens_src") or video
-        self.lens_frames = np.asarray(seq.get("lens_frames") or seq["src"], int)
-        self.focal_scale = float(seq.get("focal_scale") or 1.0)
+    def __init__(self, seq, thumbs_dir, thumb_side=720):
+        self.times = [float(t) for t in seq["times"]]   # instant (compo) de chaque image
+        self.n = len(self.times)
+        self.layer = seq["layer"]                         # {comp, layer, effect} (numéros ExtendScript)
         self.comp_fps = float(seq["fps"])
-        self.seq_start = int(seq["start"])
-        # pont AE : images calculées par After Effects (précomp), src[k] indexe bridge.times
-        self.bridge = seq.get("bridge")
-        if self.bridge:
-            self.W, self.H = int(self.bridge["width"]), int(self.bridge["height"])
-        else:
-            self.W, self.H = video_size(video)
-        self.first = int(seq.get("first") or 0)  # image à charger en premier (la référence)
+        self.seq_start = int(seq["start"])                # n° d'image compo de l'image 0
+        self.first = int(seq.get("first") or 0)           # image à charger en premier (la référence)
+        self.W, self.H = int(seq["width"]), int(seq["height"])
+        # focale : lue dans le rush du calque (ou le plus bas du précomp), image par image
+        self.lens_video = seq.get("lens_src")
+        self.lens_frames = np.asarray(seq.get("lens_frames") or range(self.n), int)
+        self.focal_scale = float(seq.get("focal_scale") or 1.0)
+        self.lens = read_lens_info(self.lens_video) if self.lens_video and Path(self.lens_video).is_file() else None
         self.scale = 0.5 if max(self.W, self.H) > 2600 else 1.0  # 4K : tracking en demi-résolution
         self.S = np.diag([self.scale, self.scale, 1.0])
         self.Si = np.linalg.inv(self.S)
@@ -90,111 +97,81 @@ class Session:
         self.cond = threading.Condition()
         self.load_error = None
         self.stop = threading.Event()
-        self.lens = read_lens_info(self.lens_video) if self.lens_video and Path(self.lens_video).is_file() else None
 
     # ------------------------------------------------------------------ images
-    def _images(self, need):
-        """(indice, image BGR) pour chaque image à charger. Fichier : une lecture dans l'ordre ;
-        pont : AE calcule chaque image, en commençant par la référence."""
-        if not self.bridge:
-            lo, hi = min(need), max(need)
-            for s, img in enumerate(iter_bgr(self.video, lo, hi), start=lo):
-                if s in need:
-                    yield s, img
-            return
-        from .bridge import Bridge
-        order = sorted(need)
-        first = int(self.src[min(max(self.first, 0), len(self.src) - 1)])
-        order = [x for x in order if x >= first] + [x for x in reversed(order) if x < first]
-        br = Bridge()
-        ds = int(round(1 / self.scale))
-        try:
-            for s in order:
-                yield s, self._render(br, s, ds)
-        finally:
-            br.close()
-
-    def _render(self, br, s, ds):
-        """Image s calculée par AE : précomp (élément) ou calque juste avant l'effet tracker."""
-        b = self.bridge
-        if b.get("layer"):
-            L = b["layer"]
-            return br.render_layer(L["comp"], L["layer"], L["effect"], b["times"][s], ds, color=True,
-                                   layer_time=L.get("time", "L") == "L")
-        return br.render(b["item"], b["times"][s], ds, color=True)
+    def _render(self, br, k, ds):
+        L = self.layer
+        return br.render_layer(L["comp"], L["layer"], L["effect"], self.times[k], ds, color=True)
 
     def load_all(self):
-        """Une passe : images de tracking en mémoire + vignettes sur disque."""
-        need = set(self.src.tolist())
+        """Une passe : images de tracking en mémoire + vignettes sur disque, la référence d'abord."""
+        first = min(max(self.first, 0), self.n - 1)
+        order = list(range(first, self.n)) + list(range(first - 1, -1, -1))
+        ds = int(round(1 / self.scale))
+        tw, th_ = int(round(self.W * self.scale)), int(round(self.H * self.scale))
         done, last, got = 0, 0.0, []
         try:
-            for s, img in self._images(need):
-                g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                tw, th_ = int(round(self.W * self.scale)), int(round(self.H * self.scale))
-                if g.shape[1] != tw or g.shape[0] != th_:
-                    g = cv2.resize(g, (tw, th_), interpolation=cv2.INTER_AREA)
-                th = self.thumbs / f"{s:05d}.jpg"
-                if not th.exists():
-                    k = min(1.0, self.thumb_side / max(img.shape[:2]))
-                    small = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+            br = Bridge()
+            try:
+                for k in order:
+                    img = self._render(br, k, ds)
+                    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    if g.shape[1] != tw or g.shape[0] != th_:
+                        g = cv2.resize(g, (tw, th_), interpolation=cv2.INTER_AREA)
+                    th = self.thumbs / f"{k:05d}.jpg"
+                    f = min(1.0, self.thumb_side / max(img.shape[:2]))
+                    small = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) if f < 1 else img
                     tmp = th.with_suffix(".tmp.jpg")
                     cv2.imwrite(str(tmp), small, [cv2.IMWRITE_JPEG_QUALITY, 78])
                     tmp.replace(th)  # le panneau ne voit jamais une vignette à moitié écrite
-                with self.cond:
-                    self.gray[s] = g
-                    self.cond.notify_all()
-                done += 1
-                got.append(int(s))
-                if time.time() - last > 0.2 or done == len(need):
-                    last = time.time()
-                    emit(type="loaded", done=done, total=len(need), got=got)
-                    got = []
+                    with self.cond:
+                        self.gray[k] = g
+                        self.cond.notify_all()
+                    done += 1
+                    got.append(k)
+                    if time.time() - last > 0.2 or done == self.n:
+                        last = time.time()
+                        emit(type="loaded", done=done, total=self.n, got=got)
+                        got = []
+            finally:
+                br.close()
         except Exception as e:  # noqa: BLE001
             self.load_error = str(e)
         with self.cond:
-            if len(self.gray) < len(need) and self.load_error is None:
-                self.load_error = f"vidéo plus courte que prévu ({len(self.gray)}/{len(need)} images lues)"
             self.cond.notify_all()
         if self.load_error:
             emit(type="log", msg="⚠ Lecture des images : " + self.load_error)
             emit(type="load_error", msg=self.load_error)
 
     def frame(self, k):
-        """Image k de la séquence (niveaux de gris, échelle de tracking) ; attend son décodage."""
-        s = int(self.src[k])
+        """Image k (niveaux de gris, échelle de tracking) ; attend qu'elle soit chargée."""
         with self.cond:
-            while s not in self.gray:
+            while k not in self.gray:
                 if self.load_error:
-                    raise IOError(f"Image {s} du fichier illisible : {self.load_error}")
+                    raise IOError(f"Image {k + self.seq_start} illisible : {self.load_error}")
                 self.cond.wait(0.5)
-            return self.gray[s]
+            return self.gray[k]
 
     # ------------------------------------------------------------------ commandes
     def cmd_frame(self, c):
-        s = int(self.src[c["k"]])
+        k = int(c["k"])
         out = Path(c["out"])
         if not out.exists():
             out.parent.mkdir(parents=True, exist_ok=True)
-            if self.bridge:
-                from .bridge import Bridge
-                br = Bridge()
-                try:
-                    img = self._render(br, s, 1)
-                finally:
-                    br.close()
-            else:
-                img = read_frame_bgr(self.video, s)
+            br = Bridge()
+            try:
+                img = self._render(br, k, 1)
+            finally:
+                br.close()
             cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        return {"path": str(out), "src": s}
+        return {"path": str(out)}
 
     def cmd_track(self, c):
         """Suit la surface depuis l'image k (dont l'homographie est connue) dans le sens dir,
         sur count images (0 : jusqu'au bout). Chaque image trackée est envoyée aussitôt."""
-        n = len(self.src)
         k, d, count = int(c["k"]), int(c["dir"]), int(c.get("count") or 0)
         ref = int(c["ref"])
-        surf = make_surface(c)
-        poly = surf.track_polygon() * self.scale
+        poly = make_surface(c).track_polygon() * self.scale
         tracker = PlanarTracker()
         tracker.prepare(self.frame(ref), poly)
         H_prev = self.S @ _mat(c["H"]) @ self.Si
@@ -203,17 +180,14 @@ class Session:
         area_prev = _area(warp_points(H_prev, poly))
         reason = "end"
         self.stop.clear()
-        while 0 <= i < n:
+        while 0 <= i < self.n:
             if count and done >= count:
                 reason = "count"
                 break
             if self.stop.is_set():
                 reason = "stop"
                 break
-            if self.src[i] == self.src[prev]:  # même image du fichier (arrêt sur image, ralenti)
-                H, conf = H_prev, 1.0
-            else:
-                H, conf, _ = tracker.step(self.frame(prev), self.frame(i), H_prev, dH, poly)
+            H, conf, _ = tracker.step(self.frame(prev), self.frame(i), H_prev, dH, poly)
             area = _area(warp_points(H, poly)) if np.all(np.isfinite(H)) else np.nan
             ratio = area / area_prev if area_prev > 0 else np.nan
             if not np.isfinite(ratio) or conf < 0.3 or not 1 / 1.5 < ratio < 1.5:
@@ -228,7 +202,9 @@ class Session:
         return {"reason": reason, "last": prev, "done": done}
 
     def cmd_solve(self, c):
-        n = len(self.src)
+        """Pose de la surface dans chaque image trackée. mode « 3d » : orientation complète ;
+        « 2d » : surface face à la caméra (position, échelle, rotation dans l'image)."""
+        n = self.n
         Hs = np.full((n, 3, 3), np.nan)
         conf = np.zeros(n)
         for key, v in c["Hs"].items():
@@ -238,7 +214,9 @@ class Session:
         ref = int(c["ref"])
         Hs[ref], conf[ref] = np.eye(3), 1.0
         track = TrackResult(Hs, conf, np.zeros(n, bool), ref)
-        surf = make_surface(c)
+        mode2d = c.get("mode") == "2d"
+        surf = make_surface(c, for_pose=not mode2d)
+        disc = bool(np.all(_radii(c) >= 0.999))
         logs = []
 
         def log(m):
@@ -247,21 +225,22 @@ class Session:
 
         focal, source = choose_focal(self.lens_video, surf, track, self.W, self.H, None, c.get("focal_mm"), 36.0,
                                      self.lens_frames, log, scale=self.focal_scale)
-        frames = _Frames(self)
-        sol = solve(track, surf, self.W, self.H, focal, normal_hint=c.get("normal"), frames_small=frames,
-                    track_scale=self.scale, log=log)
+        if mode2d:
+            corners = track.warp(surf.corners)
+            pose = solve_poses_2d(corners, focal, self.W, self.H, ref)
+            sol = dict(pose=pose, corners=corners, ref_corners=surf.corners, conics=None)
+            log("Mode 2D : surface face à la caméra (position, échelle et rotation dans l'image).")
+        else:
+            sol = solve(track, surf, self.W, self.H, focal, normal_hint=c.get("normal"), frames_small=_Frames(self),
+                        track_scale=self.scale, log=log)
         pose = sol["pose"]
-        outline = sol["outline"] if surf.kind == "free" else surf.outline_unit() if surf.kind == "rect" else None
         res = Result(self.W, self.H, self.comp_fps, n, track, sol["ref_corners"], sol["corners"], pose, source,
                      surf, None, sol["conics"], frame_offset=self.seq_start, motion_mode="object",
-                     outline=None if outline is None else _resample(outline, 32))
+                     roundness=None if disc else _radii(c).tolist())
         out = {}
         if pose.valid.any():
-            jsx = Path(c["out"])
-            jsx.parent.mkdir(parents=True, exist_ok=True)
             ae = build_ae_data(res, "object")
-            write_jsx(jsx, ae, name=f"ST {c.get('name') or Path(self.video).stem}")
-            out["jsx"] = str(jsx)
+            ae["shape"] = "disc" if disc else "rect"
             out["ae"] = ae  # valeurs d'images clés pour l'effet (panneau : « Appliquer le tracking »)
         frames_out = {}
         for i in np.flatnonzero(pose.valid):
@@ -270,24 +249,11 @@ class Session:
                                        "f": round(float(pose.focal[i]), 3),
                                        "e": round(float(pose.reproj_error[i]), 3)}
         err = pose.reproj_error[pose.valid]
-        out.update(poses=frames_out, size=[float(pose.size[0]), float(pose.size[1])], kind=surf.kind,
-                   outline=None if sol["outline"] is None else np.round(sol["outline"], 5).tolist(),
-                   focal_source=source, focal=float(np.median(pose.focal)),
+        out.update(poses=frames_out, size=[float(pose.size[0]), float(pose.size[1])],
+                   kind="disc" if disc else "rect", focal_source=source, focal=float(np.median(pose.focal)),
                    error_mean=float(np.nanmean(err)) if len(err) else None,
                    error_max=float(np.nanmax(err)) if len(err) else None, log=logs)
         return out
-
-
-def _resample(poly, n):
-    """Contour fermé ramené à n points au plus, régulièrement espacés le long du bord."""
-    poly = np.asarray(poly, float)
-    if len(poly) <= n:
-        return poly
-    closed = np.vstack([poly, poly[:1]])
-    seg = np.linalg.norm(np.diff(closed, axis=0), axis=1)
-    s = np.concatenate([[0], np.cumsum(seg)])
-    t = np.linspace(0, s[-1], n, endpoint=False)
-    return np.column_stack([np.interp(t, s, closed[:, 0]), np.interp(t, s, closed[:, 1])])
 
 
 class _Frames:
@@ -300,13 +266,12 @@ class _Frames:
         return self.s.frame(int(k))
 
 
-def run_session(video, seq_path, thumbs_dir):
+def run_session(seq_path, thumbs_dir):
     with open(seq_path, encoding="utf-8") as fh:
         seq = json.load(fh)
-    ses = Session(video, seq, thumbs_dir)
+    ses = Session(seq, thumbs_dir)
     lens = ses.lens
-    emit(type="ready", width=ses.W, height=ses.H, n=len(ses.src), scale=ses.scale,
-         thumbs=str(ses.thumbs),
+    emit(type="ready", width=ses.W, height=ses.H, n=ses.n, scale=ses.scale, thumbs=str(ses.thumbs),
          lens=None if lens is None else {"camera": lens.camera, "lens": lens.lens,
                                           "focal35_mm": round(lens.focal35_mm, 2)})
     threading.Thread(target=ses.load_all, daemon=True).start()

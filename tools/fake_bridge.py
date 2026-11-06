@@ -1,7 +1,9 @@
 """Faux pont After Effects pour tester le moteur sans AE : sert les images d'une vidéo
-avec le protocole de native/STBridge (l'élément demandé est ignoré).
+avec le protocole de native/STBridge (la compo, le calque et l'effet demandés sont ignorés ;
+l'instant demandé est pris comme instant de la vidéo).
 
     .venv/bin/python tools/fake_bridge.py VIDEO SOCKET [--delay 0.02]
+    ST_BRIDGE_SOCK=SOCKET .venv/bin/python engine.py session SEQ.json THUMBS
 """
 import argparse
 import os
@@ -14,11 +16,11 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from surftrack.video import load_gray, read_frame_bgr  # noqa: E402
+from surftrack.video import read_frame_bgr  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("video")
-ap.add_argument("sock")
+ap.add_argument("sock", help="chemin court (les sockets Unix sont limitées à ~104 caractères)")
 ap.add_argument("--delay", type=float, default=0.0, help="temps de rendu simulé par image")
 a = ap.parse_args()
 fps = cv2.VideoCapture(a.video).get(cv2.CAP_PROP_FPS) or 25.0
@@ -37,15 +39,11 @@ def serve(c):
         line, buf = buf.split(b"\n", 1)
         parts = line.decode().split()
         if parts[0] == "PING":
-            c.sendall(b"OK STBridge 1\n")
+            c.sendall(b"OK STBridge 3\n")
             continue
-        if parts[0] == "RENDERL":  # calque avant l'effet : même vidéo, temps compo
-            _, comp, layer, eff, tv, ts, ds, mode = parts[:8]
-        else:
-            _, item, tv, ts, ds, mode = parts
-        t = int(tv) / int(ts)
+        _, comp, layer, eff, tv, ts, ds, mode = parts[:8]
         with lock:
-            img = read_frame_bgr(a.video, int(t * fps + 1e-4))
+            img = read_frame_bgr(a.video, int(int(tv) / int(ts) * fps + 1e-4))
         time.sleep(a.delay)
         ds = int(ds)
         if ds > 1:

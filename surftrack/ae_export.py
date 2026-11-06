@@ -56,7 +56,7 @@ def build_ae_data(res, mode="auto"):
         "camPos": cam_pos, "camOri": cam_ori, "srfPos": srf_pos, "srfOri": srf_ori,
         # coins trackés (pour l'autocontrôle dans AE) sur quelques images
         "check": [{"f": frames[k], "c": res.corners[frames[k] - off].round(3).tolist()} for k in check],
-        "outline": None if res.outline is None else np.round(res.outline, 5).tolist(),
+        "round": None if res.roundness is None else [round(float(r), 4) for r in res.roundness],
     }
 
 
@@ -84,6 +84,7 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
     if (typeof $.global.ST_TIME_OFFSET === "number") startTime = $.global.ST_TIME_OFFSET;  // panneau (précomps compris)
     else if (comp.selectedLayers.length > 0) startTime = comp.selectedLayers[0].startTime;
 
+    __ROUNDED_SHAPE__
     function sc(v) { return [v[0] * k, v[1] * k, v[2] * k]; }
     function times() {
         var t = [];
@@ -160,23 +161,8 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
         pose(sol);
         sol.property("ADBE Transform Group").property("ADBE Scale").setValue([100 * D.size[0] * k / w, 100 * D.size[1] * k / h, 100]);
         sol.property("ADBE Transform Group").property("ADBE Opacity").setValue(60);
-        if (D.shape === "disc") {  // masque circulaire inscrit dans le carré
-            var mk = sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
-            var e = 0.5523, sh = new Shape();
-            sh.vertices = [[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]];
-            sh.inTangents = [[-e * w / 2, 0], [0, -e * h / 2], [e * w / 2, 0], [0, e * h / 2]];
-            sh.outTangents = [[e * w / 2, 0], [0, e * h / 2], [-e * w / 2, 0], [0, -e * h / 2]];
-            sh.closed = true;
-            mk.property("ADBE Mask Shape").setValue(sh);
-        }
-        if (D.shape === "free" && D.outline) {  // masque reprenant la forme libre
-            var mf = sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
-            var sf = new Shape(), vs = [];
-            for (var q = 0; q < D.outline.length; q++) vs.push([D.outline[q][0] * w, D.outline[q][1] * h]);
-            sf.vertices = vs;
-            sf.closed = true;
-            mf.property("ADBE Mask Shape").setValue(sf);
-        }
+        var sh = roundedShape(w, h, D.shape === "disc" ? [1, 1, 1, 1] : (D.round || [0, 0, 0, 0]));
+        if (sh) sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(sh);
         made.push("solide");
     }
 
@@ -221,8 +207,32 @@ JSX_TEMPLATE = r"""// 3D Surface Tracker — script généré automatiquement.
 """
 
 
+# Masque d'un rectangle w x h aux coins arrondis : r = arrondi des coins HG, HD, BD, BG (0..1, 1 =
+# rayon d'une demi-largeur / demi-hauteur, comme le contour suivi). Tous à 1 : ellipse inscrite.
+# null si aucun arrondi. Partagé avec l'effet (native/STEffect).
+ROUNDED_SHAPE_JS = r"""function roundedShape(w, h, r) {
+        var K = 0.5523, v = [], it = [], ot = [], any = false;
+        // coin : position, sens vers le côté précédent (entrée) et vers le côté suivant (sortie)
+        var C = [[0, 0, [0, 1], [1, 0]], [w, 0, [-1, 0], [0, 1]], [w, h, [0, -1], [-1, 0]], [0, h, [1, 0], [0, -1]]];
+        for (var i = 0; i < 4; i++) {
+            var rx = 0.5 * Math.max(0, Math.min(1, r[i])) * w, ry = 0.5 * Math.max(0, Math.min(1, r[i])) * h;
+            var c = C[i], a = c[2], b = c[3];
+            if (rx < 1e-3 || ry < 1e-3) { v.push([c[0], c[1]]); it.push([0, 0]); ot.push([0, 0]); continue; }
+            any = true;
+            var ra = a[0] ? rx : ry, rb = b[0] ? rx : ry;
+            v.push([c[0] + a[0] * ra, c[1] + a[1] * ra]); it.push([0, 0]); ot.push([-a[0] * K * ra, -a[1] * K * ra]);
+            v.push([c[0] + b[0] * rb, c[1] + b[1] * rb]); it.push([-b[0] * K * rb, -b[1] * K * rb]); ot.push([0, 0]);
+        }
+        if (!any) return null;
+        var s = new Shape();
+        s.vertices = v; s.inTangents = it; s.outTangents = ot; s.closed = true;
+        return s;
+    }"""
+
+
 def write_jsx(path, data, name="ST"):
     js = JSX_TEMPLATE.replace("__DATA__", json.dumps(data, separators=(",", ":")))
+    js = js.replace("__ROUNDED_SHAPE__", ROUNDED_SHAPE_JS)
     js = js.replace("__NAME__", json.dumps(name, ensure_ascii=False))
     with open(path, "w", encoding="utf-8-sig") as fh:  # BOM : AE lit alors l'UTF-8 correctement
         fh.write(js)

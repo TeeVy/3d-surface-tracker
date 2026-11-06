@@ -1,7 +1,5 @@
 """Aperçu : zone trackée (vert) + surface 3D reprojetée (cyan), pour juger le résultat d'un coup d'œil."""
 
-from pathlib import Path
-
 import cv2
 import numpy as np
 
@@ -68,11 +66,3 @@ def write_preview(video_path, out_path, res, max_side=1600):
         writer.write(img)
     if writer is not None:
         writer.release()
-
-
-def write_preview_jpgs(video_path, out_dir, res, pose=None, max_side=720, quality=80):
-    """Une image JPEG annotée par image vidéo (pour l'aperçu du panneau)."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for i, img in annotated_frames(video_path, res, pose=pose, max_side=max_side, label=False):
-        cv2.imwrite(str(out_dir / f"{i:05d}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, quality])

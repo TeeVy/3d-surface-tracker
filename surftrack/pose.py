@@ -298,3 +298,42 @@ def solve_disc_poses(conics, homographies, focal, width, height, ref_index, flip
 def warp_points_h(H, pts):
     p = np.column_stack([pts, np.ones(len(pts))]) @ H.T
     return p[:, :2] / p[:, 2:3]
+
+
+def solve_poses_2d(corners, focal, width, height, ref_index):
+    """Mode 2D : la surface reste face à la caméra (seule la rotation dans l'image est suivie),
+    comme un tracking 2D classique position / échelle / rotation.
+
+    Dans chaque image, les 4 coins trackés (HG, HD, BD, BG) donnent un centre, un angle
+    (côtés haut et bas) et une échelle (aire) par rapport à l'image de référence. En 3D, la
+    surface est parallèle à l'image ; son éloignement traduit l'échelle : à la référence elle
+    est à la distance de la focale, où 1 unité = 1 pixel."""
+    corners = np.asarray(corners, float)
+    n = len(corners)
+    focal = as_focals(focal, n)
+    valid = np.isfinite(corners).all(axis=(1, 2))
+    cx, cy = width / 2, height / 2
+
+    def measure(c):
+        hg, hd, bd, bg = c
+        top, bottom = hd - hg, bd - bg
+        d = top / np.linalg.norm(top) + bottom / np.linalg.norm(bottom)
+        w = 0.5 * (np.linalg.norm(top) + np.linalg.norm(bottom))
+        h = 0.5 * (np.linalg.norm(bg - hg) + np.linalg.norm(bd - hd))
+        return c.mean(axis=0), np.arctan2(d[1], d[0]), w, h
+
+    _, _, w0, h0 = measure(corners[ref_index])
+    R = np.tile(np.eye(3), (n, 1, 1))
+    t = np.full((n, 3), np.nan)
+    err = np.full(n, np.nan)
+    obj = np.array([[-w0 / 2, -h0 / 2], [w0 / 2, -h0 / 2], [w0 / 2, h0 / 2], [-w0 / 2, h0 / 2]])
+    for i in np.flatnonzero(valid):
+        ctr, ang, w, h = measure(corners[i])
+        s = np.sqrt(w * h / (w0 * h0))
+        z = focal[i] / s
+        c, sn = np.cos(ang), np.sin(ang)
+        R[i] = [[c, -sn, 0], [sn, c, 0], [0, 0, 1]]
+        t[i] = [(ctr[0] - cx) * z / focal[i], (ctr[1] - cy) * z / focal[i], z]
+        proj = (obj @ R[i][:2, :2].T) * s + ctr  # rectangle ajusté, en pixels
+        err[i] = float(np.sqrt(np.mean(np.sum((proj - corners[i]) ** 2, axis=1))))
+    return PoseResult(R, t, (float(w0), float(h0)), focal, err, valid)

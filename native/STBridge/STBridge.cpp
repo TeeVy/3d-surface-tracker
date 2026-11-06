@@ -1,19 +1,17 @@
 /*  3D Surface Tracker — pont After Effects (AEGP).
 
-    Donne au moteur de tracking les images d'un élément du projet (précomp ou
-    métrage) telles qu'After Effects les calcule, directement en mémoire : pas de
-    file d'attente de rendu, pas de fichiers.
+    Donne au moteur de tracking les images d'un calque telles qu'elles arrivent à
+    l'effet « 3D Surface Tracker », calculées par After Effects et envoyées
+    directement en mémoire : pas de file d'attente de rendu, pas de fichiers.
 
     Un fil d'exécution écoute sur une socket locale
         ~/Library/Application Support/3D Surface Tracker/bridge.sock
     Chaque requête est une ligne de texte :
         PING
-            -> "OK STBridge 2\n"
-        RENDER <id élément> <temps (valeur)> <temps (échelle)> <sous-échantillonnage> <G|C>
-        RENDERL <id compo> <n° calque> <n° effet> <temps compo (valeur)> <(échelle)> <sous-éch.> <G|C> [L|C]
+            -> "OK STBridge 3\n"
+        RENDERL <id compo> <n° calque> <n° effet> <temps compo (valeur)> <(échelle)> <sous-éch.> <G|C>
             image du calque juste AVANT l'effet indiqué (effets au-dessus compris, numéros
-            comptés à partir de 1 comme en ExtendScript) ; L : le temps compo est converti en
-            temps du calque (par défaut), C : passé tel quel
+            comptés à partir de 1 comme en ExtendScript), à un instant de la compo
             -> "OK <largeur> <hauteur> <canaux>\n" puis les pixels (1 octet par canal,
                lignes contiguës ; G : niveaux de gris, C : bleu-vert-rouge)
             -> "ERR <message>\n"
@@ -55,9 +53,7 @@ SPBasicSuite* S_sp = nullptr;
 A_Err (*S_wake)(void) = nullptr;  // AEGP_CauseIdleRoutinesToBeCalled : appelable depuis n'importe quel fil
 
 struct Request {
-    bool layer = false;     // RENDERL : calque avant un effet
     A_long layer_index = 0, effect_index = 0;
-    bool layer_time = true;
     A_long item = 0;
     A_long tvalue = 0;
     A_u_long tscale = 1;
@@ -79,17 +75,6 @@ int S_listen = -1;
 std::string S_sock_path;
 
 // ------------------------------------------------------------------ rendu (fil principal)
-// Options de rendu v4 (qualité de décodage) : absente de AEGP_SuiteHandler, acquise à la main.
-const AEGP_RenderOptionsSuite4* RO()
-{
-    static const AEGP_RenderOptionsSuite4* suite = nullptr;
-    if (!suite) {
-        const void* p = nullptr;
-        if (!S_sp->AcquireSuite(kAEGPRenderOptionsSuite, kAEGPRenderOptionsSuiteVersion4, &p)) suite = static_cast<const AEGP_RenderOptionsSuite4*>(p);
-    }
-    return suite;
-}
-
 AEGP_ItemH FindItem(AEGP_SuiteHandler& suites, A_long wanted)
 {
     AEGP_ProjectH projH = nullptr;
@@ -153,7 +138,7 @@ void RenderLayer(AEGP_SuiteHandler& suites, Request& r)
     }
     ERR(suites.LayerRenderOptionsSuite2()->AEGP_NewFromUpstreamOfEffect(S_id, effectH, &lroH));
     A_Time ct = {r.tvalue, r.tscale}, t = ct;
-    if (!err && r.layer_time) ERR(suites.LayerSuite9()->AEGP_ConvertCompToLayerTime(layerH, &ct, &t));
+    if (!err) ERR(suites.LayerSuite9()->AEGP_ConvertCompToLayerTime(layerH, &ct, &t));
     if (!err && lroH) {
         ERR(suites.LayerRenderOptionsSuite2()->AEGP_SetTime(lroH, t));
         ERR(suites.LayerRenderOptionsSuite2()->AEGP_SetWorldType(lroH, AEGP_WorldType_8));
@@ -173,33 +158,6 @@ void RenderLayer(AEGP_SuiteHandler& suites, Request& r)
     ERR2(suites.EffectSuite4()->AEGP_DisposeEffect(effectH));
 }
 
-void Render(AEGP_SuiteHandler& suites, Request& r)
-{
-    if (r.layer) { RenderLayer(suites, r); return; }
-    AEGP_ItemH itemH = FindItem(suites, r.item);
-    if (!itemH) { r.error = "element introuvable dans le projet"; return; }
-    A_Err err = A_Err_NONE, err2 = A_Err_NONE;
-    if (!RO()) { r.error = "suite de rendu indisponible"; return; }
-    AEGP_RenderOptionsH roH = nullptr;
-    ERR(RO()->AEGP_NewFromItem(S_id, itemH, &roH));
-    if (err || !roH) { r.error = "options de rendu impossibles"; return; }
-    A_Time t = {r.tvalue, r.tscale};
-    ERR(RO()->AEGP_SetTime(roH, t));
-    ERR(RO()->AEGP_SetWorldType(roH, AEGP_WorldType_8));
-    ERR(RO()->AEGP_SetDownsampleFactor(roH, r.ds, r.ds));
-    ERR(RO()->AEGP_SetChannelOrder(roH, AEGP_ChannelOrder_ARGB));
-    ERR(RO()->AEGP_SetRenderQuality(roH, AEGP_ItemQuality_BEST));
-    AEGP_FrameReceiptH receiptH = nullptr;
-    if (!err) err = suites.RenderSuite5()->AEGP_RenderAndCheckoutFrame(roH, nullptr, nullptr, &receiptH);
-    if (!err && receiptH) {
-        Grab(suites, receiptH, r);
-        ERR2(suites.RenderSuite5()->AEGP_CheckinFrame(receiptH));
-    } else if (r.error.empty()) {
-        r.error = "rendu refuse par After Effects (erreur " + std::to_string(err) + ")";
-    }
-    ERR2(RO()->AEGP_Dispose(roH));
-}
-
 A_Err IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long* max_sleepPL)
 {
     AEGP_SuiteHandler suites(S_sp);
@@ -213,7 +171,7 @@ A_Err IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long* max_sleepPL)
             S_queue.pop_front();
         }
         try {
-            Render(suites, *r);
+            RenderLayer(suites, *r);
         } catch (...) {
             r->error = "exception pendant le rendu";
         }
@@ -259,24 +217,18 @@ void Serve(int fd)
         std::string line = buf.substr(0, nl);
         buf.erase(0, nl + 1);
         if (line.rfind("PING", 0) == 0) {
-            if (!SendLine(fd, "OK STBridge 2\n")) break;
+            if (!SendLine(fd, "OK STBridge 3\n")) break;
             continue;
         }
         auto r = std::make_shared<Request>();
         long item = 0, tv = 0, ds = 1, li = 0, ei = 0;
         unsigned long ts = 1;
-        char mode = 'G', tmode = 'L';
-        bool ok;
-        if (line.rfind("RENDERL", 0) == 0) {
-            ok = std::sscanf(line.c_str(), "RENDERL %ld %ld %ld %ld %lu %ld %c %c", &item, &li, &ei, &tv, &ts, &ds, &mode, &tmode) >= 6
-                 && li >= 1 && ei >= 1;
-            r->layer = true;
-            r->layer_index = static_cast<A_long>(li);
-            r->effect_index = static_cast<A_long>(ei);
-            r->layer_time = (tmode != 'C');
-        } else {
-            ok = std::sscanf(line.c_str(), "RENDER %ld %ld %lu %ld %c", &item, &tv, &ts, &ds, &mode) >= 4;
-        }
+        char mode = 'G';
+        bool ok = line.rfind("RENDERL", 0) == 0 &&
+                  std::sscanf(line.c_str(), "RENDERL %ld %ld %ld %ld %lu %ld %c", &item, &li, &ei, &tv, &ts, &ds, &mode) >= 6 &&
+                  li >= 1 && ei >= 1;
+        r->layer_index = static_cast<A_long>(li);
+        r->effect_index = static_cast<A_long>(ei);
         if (!ok || ts == 0 || ds < 1) {
             if (!SendLine(fd, "ERR requete invalide\n")) break;
             continue;

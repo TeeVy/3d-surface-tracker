@@ -48,36 +48,47 @@ Dans le Terminal, depuis ce dossier :
 2. **Image de référence** : cliquez ou glissez dans la timeline (← → ; Maj : 10 images) jusqu'à une
    image nette où la surface est bien visible. Avant tout suivi, l'image où vous relâchez devient la
    référence (triangle jaune).
-3. **Surface** :
-   - **Rectangle** : cliquez les 4 coins. Le curseur d'arrondi arrondit les 4 coins ; cliquez d'abord
-     un coin pour n'arrondir que lui (clic dans le vide : retour aux 4). Tous à fond : **disque**, et
-     ⇅ inverse son inclinaison.
-   - **Forme libre** : cliquez le contour d'une zone plane. La grille épouse la forme.
-   - Glissez un **point**, ou un **côté** pour déplacer ses deux points d'un bloc.
-   - **Orientation** : glissez un **anneau** (X rouge, Y vert, Z bleu) pour tourner la surface autour
-     de cet axe. Pour une forme libre, l'orientation est sinon déduite du mouvement, ce qui demande de
-     la perspective : un rectangle, lui, la donne par ses angles droits.
+3. **Surface** : cliquez ses 4 coins, au plus près des vrais coins (la loupe aide) : ils donnent à la
+   fois la zone suivie et le rectangle réel dont on calcule l'orientation.
+   - **2D / 3D** : en 3D (par défaut), la surface prend son orientation réelle. En 2D, elle reste
+     face à la caméra et ne suit que position, échelle et rotation dans l'image, comme un tracking 2D.
+   - **Gizmo** : Déplacer (W), Tourner (E), Mettre à l'échelle (R), en axes **locaux** (le gizmo suit
+     la surface) ou **du monde** (il fait face à la caméra) ; X bascule entre les deux. Déplacer : les
+     flèches suivent un axe, le carré central fait glisser la surface dans son plan. Tourner : un
+     anneau par axe. Échelle : largeur, hauteur, ou les deux avec le carré central.
+   - **Arrondi** : la petite poignée près de chaque coin se glisse vers l'intérieur pour l'arrondir
+     (Maj : les 4 ensemble ; double-clic : plus d'arrondi). Les 4 à fond : **disque** (⇅ inverse son
+     inclinaison).
+   - Glissez un **coin**, ou un **côté** pour déplacer ses deux coins d'un bloc.
    - Vue : molette pour zoomer, Espace ou clic droit pour la déplacer, double-clic pour recadrer.
 4. **Tracker** avec les boutons sous l'image : en arrière jusqu'au bout, une image en arrière, en
    avant **puis** en arrière, une image en avant, en avant jusqu'au bout. Le suivi part de l'image
    affichée et s'arrête à la **clé** suivante, au bout du calque, ou s'il décroche ; le bouton en cours
    devient ■ pour l'arrêter.
-5. **Corriger** : si la forme dérive sur une image, glissez ses points ou ses côtés : ça pose une
+5. **Corriger** : si la forme dérive sur une image, retouchez-la (coins, côtés, gizmo) : ça pose une
    **clé** (◆ dans la timeline). La forme y est imposée et le suivi est corrigé progressivement entre
-   les clés voisines. Vous pouvez aussi retracker depuis la clé, vers l'avant ou l'arrière, jusqu'à la
-   clé suivante. Le bouton ◆ pose une clé sur l'image affichée, ou la retire.
-6. **Appliquer le tracking** : la pose 3D est écrite en images clés dans l'effet (groupe « Données du
-   tracking »), donc enregistrée avec le projet. Quand l'effet est sélectionné, la grille 3D s'affiche
-   dans la fenêtre de composition (case « Afficher la grille »). Les boutons **Créer : Null / Solide /
-   Texte** de l'effet ajoutent un calque 3D posé sur la surface, avec sa caméra : ils sont liés à
-   l'effet par expressions et suivent donc un nouveau tracking appliqué.
+   les clés voisines. Vous pouvez aussi retracker depuis la clé jusqu'à la clé suivante. Le bouton ◆
+   pose une clé sur l'image affichée, ou la retire.
+6. **Appliquer le tracking** : la pose est écrite en images clés dans l'effet. Le travail du panneau
+   (forme, suivi, clés) est enregistré dans le projet : en rouvrant le tracker sur ce calque, on le
+   retrouve tel quel.
 
-**Annuler** : ⌘Z annule n'importe quelle action du panneau (points, arrondis, rotation, clés,
-référence, suivi…), ⇧⌘Z la rétablit. La corbeille propose d'effacer le suivi seul (la forme reste)
-ou tout.
+**L'effet**, dans l'ordre : *Tracker* (ouvrir le panneau), *Afficher la grille* (grille 3D dans la
+fenêtre de composition quand l'effet est sélectionné), *Données du tracking* (seules la position et
+l'orientation sont animées, et le zoom si l'objectif zoome ; le reste décrit la surface et la caméra),
+*Créer* : un null, un solide ou un texte posé sur la surface, avec sa caméra. Ces calques sont liés à
+l'effet par expressions et suivent un nouveau tracking appliqué.
 
-Les fichiers de chaque session sont dans `out/panel/`, les vignettes (gardées d'une fois sur
-l'autre pour un même fichier) dans `out/panel/cache/`.
+**Annuler** : ⌘Z annule n'importe quelle action du panneau, ⇧⌘Z la rétablit. La corbeille propose
+d'effacer le suivi seul (la forme reste) ou tout.
+
+**Pour un bon tracking** : placez les coins sur les vrais coins de la surface plutôt qu'un peu en
+dehors (le fond qui bouge autrement que la surface fausse le suivi) ou trop à l'intérieur (les bords
+sont ce qui se suit le mieux) ; quelques pixels de débord sont tolérés. Choisissez une référence nette,
+où la surface est grande et bien visible. Sur une surface brillante, ce sont les arêtes qui comptent :
+les reflets glissent quand la caméra bouge.
+
+Les images de chaque session (vignettes, images en pleine résolution) sont dans `out/panel/`.
 
 ## Utilisation en ligne de commande
 
@@ -150,6 +161,10 @@ l'autre pour un même fichier) dans `out/panel/cache/`.
 
 # autotest dans After Effects : génère out/selftest/harness.jsx, à lancer dans AE
 .venv/bin/python tools/ae_selftest.py --no-run
+
+# moteur du panneau sans After Effects : un faux pont sert les images d'une vidéo
+.venv/bin/python tools/fake_bridge.py test_data/object_rect.mp4 /tmp/st.sock &
+ST_BRIDGE_SOCK=/tmp/st.sock .venv/bin/python engine.py session SEQ.json out/thumbs
 ```
 
 Précision actuelle avec une focale connue (métadonnées) :
@@ -164,10 +179,12 @@ En faible perspective, le sens de l'inclinaison d'un disque est physiquement amb
 
 ## Limites connues
 
-- **Formes « presque rondes »** (carré très arrondi, ovale) : elles sont approximées par un disque.
-- **Disques sans métadonnées** : la focale ne peut pas être estimée. Utilisez `--focal-mm`.
+- **Disques sans métadonnées** : la focale ne peut pas être estimée ; saisissez-la dans le panneau
+  (ou `--focal-mm` en ligne de commande).
+- **Arrondis** : ils sont définis dans le carré unité du rectangle ; sur un rectangle très allongé, les
+  coins arrondis sont légèrement elliptiques.
 - **Occultation partielle** : supportée par le suivi du bord. Une occultation de la plus grande partie
   de la surface fait décrocher le suivi.
 - **Vitesse** : environ 3 à 12 images par seconde selon le cas. La 4K est trackée en demi-résolution.
-- **Mode caméra** : pas encore de raccord avec la caméra du Camera Tracker d'AE.
-- **Phase 1** : panneau intégré à AE (tracer, tracker, appliquer sans quitter AE).
+- **Caméra** : la caméra créée est fixe et la surface animée ; pas encore de raccord avec la caméra du
+  Camera Tracker d'AE.

@@ -1,5 +1,10 @@
 // 3D Surface Tracker — fonctions ExtendScript appelées par le panneau.
 // Chaque fonction renvoie une chaîne JSON.
+//
+// Le calque tracké porte l'effet « 3D Surface Tracker » : le panneau suit l'image telle
+// qu'elle arrive à cet effet (calculée par After Effects, via le pont STBridge), écrit le
+// résultat dans les paramètres de l'effet, et enregistre son travail (forme, suivi, clés)
+// dans les métadonnées XMP du projet pour le retrouver à la réouverture.
 
 function stJSON(v) {
     if (v === null || v === undefined) return "null";
@@ -24,46 +29,48 @@ function stFail(msg) { return stJSON({ok: false, msg: msg}); }
 
 function stNear(a, b, tol) { return Math.abs(a - b) <= tol; }
 
+var ST_MATCH = "SurfTrack 3D Surface Tracker";
+
+function stFindComp(compId) {
+    var c = app.project.itemByID(compId);
+    return (c instanceof CompItem) ? c : null;
+}
+
 function stIsVideoFootage(src) {
     return (src instanceof FootageItem) && src.file && !(src.mainSource instanceof SolidSource) &&
            !src.mainSource.isStill && src.hasVideo;
 }
 
-// Calque vidéo à utiliser dans un précomp : le plus bas des calques vidéo (ou précomps) actifs.
-function stPickInner(comp, warnings) {
-    var found = null, others = [];
-    for (var i = comp.numLayers; i >= 1; i--) {
-        var L = comp.layer(i);
-        if (!L.enabled || !(L instanceof AVLayer) || !L.hasVideo) continue;
-        var src = L.source;
-        if (stIsVideoFootage(src) || (src instanceof CompItem)) {
-            if (!found) found = L; else others.push(L.name);
-        }
-    }
-    if (found && others.length) {
-        warnings.push("Le précomp « " + comp.name + " » contient plusieurs vidéos : j'utilise « " + found.name +
-                      " » (le calque vidéo le plus bas).");
-    }
-    return found;
-}
-
-// Calque vidéo sélectionné dans la composition active + image courante.
-// Si c'est un précomp, on descend jusqu'au fichier vidéo en cumulant décalages
-// temporels et transformations, pour vérifier que l'image du fichier se
-// retrouve telle quelle (à l'échelle près) dans la compo.
+// Calque sélectionné dans la composition active (bouton ↻ du panneau).
 function stGetSelection() {
     var comp = app.project.activeItem;
-    if (!(comp instanceof CompItem)) return stFail("Ouvrez la composition et sélectionnez le calque vidéo à tracker.");
-    if (comp.selectedLayers.length === 0) return stFail("Sélectionnez le calque vidéo à tracker dans la composition.");
+    if (!(comp instanceof CompItem)) return stFail("Ouvrez la composition et sélectionnez le calque à tracker.");
+    if (comp.selectedLayers.length === 0) return stFail("Sélectionnez le calque à tracker dans la composition.");
     return stDescribe(comp, comp.selectedLayers[0], comp.time);
 }
 
-// Calque désigné par le script « Tracker le calque » (compo, indice, instant au lancement).
+// Calque désigné par le bouton de l'effet (compo, indice, instant ; instant < 0 : celui de la compo).
 function stGetLayer(compId, layerIndex, time) {
     var comp = stFindComp(compId);
     if (!comp) return stFail("La composition du calque à tracker est introuvable.");
     if (layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Le calque à tracker est introuvable.");
     return stDescribe(comp, comp.layer(layerIndex), time < 0 ? comp.time : time);
+}
+
+// Indice (1..n) de l'effet « 3D Surface Tracker » actif sur le calque, ou 0.
+function stTrackerEffect(L) {
+    var par = L.property("ADBE Effect Parade");
+    if (!par) return 0;
+    for (var i = 1; i <= par.numProperties; i++) {
+        if (par.property(i).matchName === ST_MATCH && par.property(i).active) return i;
+    }
+    return 0;
+}
+
+function stTrackerFx(comp, layerIndex) {
+    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return null;
+    var i = stTrackerEffect(comp.layer(layerIndex));
+    return i ? comp.layer(layerIndex).property("ADBE Effect Parade").property(i) : null;
 }
 
 // Temps dans la source d'un calque à l'instant t de sa compo (remappage et étirement
@@ -74,46 +81,22 @@ function stLayerTime(L, t) {
     return (t - L.startTime) * 100 / L.stretch;
 }
 
-// Image du fichier vidéo affichée à l'instant t de la compo du haut, en suivant la
-// chaîne de calques (précomps, remappages, étirements) ; -1 si rien n'est visible.
-function stSourceFrame(chain, t, fps, srcFrames) {
-    for (var i = 0; i < chain.length; i++) {
-        t = stLayerTime(chain[i], t);
-        if (t === null) return -1;
-        if (i < chain.length - 1 && (t < -1e-6 || t >= chain[i].source.duration - 1e-6)) return -1;
-    }
-    var f = Math.floor(t * fps + 1e-4);  // AE affiche l'image commencée au plus tard à cet instant
-    return (f < 0 || f >= srcFrames) ? -1 : f;
-}
-
-// Noms des effets actifs d'un calque (ils peuvent déplacer les pixels : stabilisation…).
-function stActiveEffects(L) {
-    var out = [], fx = L.property("ADBE Effect Parade");
-    if (!fx) return out;
-    for (var i = 1; i <= fx.numProperties; i++) if (fx.property(i).active) out.push(fx.property(i).name);
-    return out;
-}
-
-// Calque à tracker : SEUL le calque sélectionné compte. Un précomp est une boîte noire
-// dont After Effects calcule l'image (pont STBridge) ; un métrage est lu directement.
-// Les effets du calque lui-même ne seraient pas pris en compte : on demande de précomposer.
+// Description du calque pour le panneau : images de la compo où il est visible, effet
+// tracker, rush pour la focale. Sans l'effet, le panneau propose de l'ajouter.
 function stDescribe(comp, sel, time) {
     if (!(sel instanceof AVLayer) || !sel.source) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
     var src = sel.source, isComp = src instanceof CompItem;
     if (!isComp && !stIsVideoFootage(src)) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
-    var warnings = [];
-    // Effet « 3D Surface Tracker » sur le calque : on suit l'image telle qu'elle lui arrive
-    // (effets placés au-dessus compris). Sinon, le calque ne doit pas avoir d'effets.
     var stFx = stTrackerEffect(sel);
-    var fx = stActiveEffects(sel);
-    if (stFx) {
-        var below = [], par = sel.property("ADBE Effect Parade");
-        for (var e = stFx + 1; e <= par.numProperties; e++) if (par.property(e).active) below.push(par.property(e).name);
-        if (below.length) warnings.push("Effets placés sous « 3D Surface Tracker » (" + below.join(", ") + ") : le tracking ne les voit pas. Mettez le tracker en bas de la pile.");
-    } else {  // l'effet porte le tracking : sans lui, le panneau propose de l'ajouter
+    if (!stFx) {
+        var par0 = sel.property("ADBE Effect Parade");
         return stJSON({ok: true, needEffect: true, compId: comp.id, compName: comp.name, layerIndex: sel.index,
-                       layerName: sel.name, hasEffects: fx.length > 0});
+                       layerName: sel.name, hasEffects: par0.numProperties > 0});
     }
+    var warnings = [];
+    var below = [], par = sel.property("ADBE Effect Parade");
+    for (var e = stFx + 1; e <= par.numProperties; e++) if (par.property(e).active) below.push(par.property(e).name);
+    if (below.length) warnings.push("Effets placés sous « 3D Surface Tracker » (" + below.join(", ") + ") : le tracking ne les voit pas. Mettez le tracker en bas de la pile.");
     var tr = sel.property("ADBE Transform Group");
     var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
     var sc = tr.property("ADBE Scale").value, rot = tr.property("ADBE Rotate Z").value;
@@ -126,10 +109,9 @@ function stDescribe(comp, sel, time) {
         warnings.push("Le calque est déplacé ou mis à l'échelle dans la compo : la surface 3D sera décalée. " +
                       "Il doit remplir la compo tel quel (précomposez-le si besoin).");
     }
-    var retimed = sel.timeRemapEnabled || !stNear(sel.stretch, 100, 0.01);
 
-    // Image de la source montrée à chaque image de la compo où le calque est visible
-    // (remappage et étirement du calque compris).
+    // Images de la compo où le calque est visible ; pour la focale, l'instant correspondant
+    // dans la source du calque (remappage et étirement compris).
     var fd = comp.frameDuration, fps = isComp ? 1 / src.frameDuration : src.frameRate;
     var srcFrames = isComp ? 0 : Math.round(src.duration * fps);
     var j0 = Math.max(0, Math.ceil(sel.inPoint / fd - 1e-4));
@@ -155,139 +137,55 @@ function stDescribe(comp, sel, time) {
                       (cur < 0 ? "sa première" : "sa dernière") + " image. Choisissez-la dans la timeline du panneau.");
         cur = Math.min(keys.length - 1, Math.max(0, cur));
     }
+    var times = [];
+    for (var c = 0; c < keys.length; c++) times.push((seqStart + c) * fd);
     var out = {
-        ok: true, compId: comp.id, compName: comp.name, compW: comp.width, compH: comp.height,
-        compFps: 1 / fd, layerIndex: sel.index, layerName: sel.name, seqStart: seqStart, cur: cur,
-        retimed: retimed, warnings: warnings, chain: [sel.name]
+        ok: true, compId: comp.id, compName: comp.name, compFps: 1 / fd, layerIndex: sel.index, layerName: sel.name,
+        effectIndex: stFx, width: src.width, height: src.height, sourceName: src.name,
+        seqStart: seqStart, times: times, cur: cur, warnings: warnings,
+        retimed: sel.timeRemapEnabled || !stNear(sel.stretch, 100, 0.01)
     };
-    if (stFx) {  // calque juste avant l'effet tracker, calculé par AE (pont)
-        out.mode = "layer";
-        out.effectIndex = stFx;
-        out.itemW = src.width; out.itemH = src.height;
-        out.footageName = src.name;
-        var ctimes = [], ltimes = [];
-        for (var c = 0; c < keys.length; c++) ctimes.push((seqStart + c) * fd);
-        out.times = ctimes; out.frames = [];
-        for (var c2 = 0; c2 < keys.length; c2++) out.frames.push(c2);
-        if (isComp) {
-            var lensC = stLensInside(src, keys);
-            if (lensC) { out.lensFile = lensC.file; out.lensFrames = lensC.frames; out.focalScale = lensC.scale; }
-        } else {
-            out.lensFile = src.file.fsName; out.lensFrames = keys; out.focalScale = 1;
-        }
-        return stJSON(out);
+    if (isComp) {
+        var lens = stLensInside(src, keys);
+        if (lens) { out.lensFile = lens.file; out.lensFrames = lens.frames; out.focalScale = lens.scale; }
+    } else {
+        out.lensFile = src.file.fsName; out.lensFrames = keys; out.focalScale = 1;
     }
-    if (!isComp) {  // métrage : lu directement dans le fichier
-        out.mode = "file";
-        out.file = src.file.fsName; out.footageName = src.name; out.fps = fps;
-        out.frames = keys;
-        return stJSON(out);
-    }
-
-    // Précomp : instants distincts (une image figée n'est calculée qu'une fois)
-    var times = [], index = {}, frames = [];
-    for (var u = 0; u < keys.length; u++) {
-        var key = String(Math.round(keys[u] * 1e5));
-        if (!index.hasOwnProperty(key)) { index[key] = times.length; times.push(keys[u]); }
-        frames.push(index[key]);
-    }
-    out.mode = "bridge";
-    out.item = src.id; out.itemW = src.width; out.itemH = src.height;
-    out.footageName = src.name; out.frames = frames; out.times = times;
-
-    // Focale : seulement lue dans le rush du précomp s'il y en a un (les pixels, eux, viennent d'AE)
-    var lens = stLensInside(src, times);
-    if (lens) { out.lensFile = lens.file; out.lensFrames = lens.frames; out.focalScale = lens.scale; out.file = lens.file; }
     return stJSON(out);
 }
 
-// Indice (1..n) de l'effet « 3D Surface Tracker » actif sur le calque, ou 0.
-function stTrackerEffect(L) {
-    var par = L.property("ADBE Effect Parade");
-    if (!par) return 0;
-    for (var i = 1; i <= par.numProperties; i++) {
-        if (par.property(i).matchName === "SurfTrack 3D Surface Tracker" && par.property(i).active) return i;
-    }
-    return 0;
-}
-
 // Rush le plus bas d'un précomp (en descendant les précomps imbriqués) : fichier, image du
-// fichier à chaque instant demandé, agrandissement dans le précomp. null si aucun.
+// fichier à chaque instant demandé, agrandissement dans le précomp. null si aucun. Ne sert
+// qu'à lire la focale dans les métadonnées : les pixels, eux, viennent d'After Effects.
 function stLensInside(comp, times) {
-    var chain = [], Ax = 1, L = null, c = comp, ignored = [];
+    var chain = [], Ax = 1, L = null, c = comp;
     for (var depth = 0; depth < 12; depth++) {
-        L = stPickInner(c, ignored);
+        L = null;
+        for (var i = c.numLayers; i >= 1 && !L; i--) {  // le plus bas des calques vidéo actifs
+            var C = c.layer(i);
+            if (C.enabled && C instanceof AVLayer && C.hasVideo && (stIsVideoFootage(C.source) || C.source instanceof CompItem)) L = C;
+        }
         if (!L) return null;
         chain.push(L);
         Ax *= L.property("ADBE Transform Group").property("ADBE Scale").value[0] / 100;
         if (stIsVideoFootage(L.source)) break;
-        if (!(L.source instanceof CompItem)) return null;
         c = L.source;
     }
     var src = L.source;
     if (!stIsVideoFootage(src)) return null;
     var fps = src.frameRate, n = Math.round(src.duration * fps), frames = [], last = 0;
-    for (var i = 0; i < times.length; i++) {
-        var f = stSourceFrame(chain, times[i], fps, n);
-        if (f < 0) f = last;
+    for (var k = 0; k < times.length; k++) {
+        var t = times[k], ok = true;
+        for (var m = 0; m < chain.length && ok; m++) {
+            t = stLayerTime(chain[m], t);
+            ok = t !== null && (m === chain.length - 1 || (t >= -1e-6 && t < chain[m].source.duration - 1e-6));
+        }
+        var f = ok ? Math.floor(t * fps + 1e-4) : -1;
+        if (f < 0 || f >= n) f = last;
         frames.push(f);
         last = f;
     }
     return {file: src.file.fsName, frames: frames, scale: Ax * src.width / comp.width};
-}
-
-// Rend le calque tel que la compo le montre (effets compris), images seqStart à seqStart+n-1
-// de la compo, dans outDir. Le calque est mis en solo le temps du rendu ; les autres éléments
-// de la file d'attente sont mis de côté puis rétablis.
-function stRenderLayer(compId, layerIndex, seqStart, n, outDir) {
-    var comp = stFindComp(compId);
-    if (!comp) return stFail("Composition introuvable.");
-    if (layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
-    var sel = comp.layer(layerIndex);
-    var rq = app.project.renderQueue, solos = [], queued = [], item = null, i;
-    var folder = new Folder(outDir);
-    if (!folder.exists) folder.create();
-    try {
-        for (i = 1; i <= comp.numLayers; i++) {
-            var L = comp.layer(i);
-            if (L instanceof AVLayer) { solos.push([L, L.solo]); L.solo = (i === layerIndex); }
-        }
-        for (i = 1; i <= rq.numItems; i++) {
-            if (rq.item(i).status === RQItemStatus.QUEUED) { queued.push(rq.item(i)); rq.item(i).render = false; }
-        }
-        item = rq.items.add(comp);
-        item.timeSpanStart = seqStart * comp.frameDuration;
-        item.timeSpanDuration = n * comp.frameDuration;
-        var om = item.outputModule(1);
-        var fmt = "", names = ["JPEG Sequence", "Séquence JPEG", "PNG Sequence", "Séquence PNG", "TIFF Sequence", "Séquence TIFF"];
-        for (i = 0; i < names.length && !fmt; i++) {
-            try {
-                om.setSettings({"Format": names[i]});
-                var got = om.getSettings(GetSettingsFormat.STRING)["Format"];
-                if (got && /JPEG|PNG|TIFF/i.test(got)) fmt = got;
-            } catch (e) { /* format inconnu dans cette version */ }
-        }
-        if (!fmt) {  // repli : un modèle de sortie en séquence d'images s'il y en a un
-            for (i = 0; i < om.templates.length && !fmt; i++) {
-                if (/PNG|TIFF|JPEG/i.test(om.templates[i])) { om.applyTemplate(om.templates[i]); fmt = om.templates[i]; }
-            }
-        }
-        var ext = /PNG/i.test(fmt) ? "png" : /TIFF/i.test(fmt) ? "tif" : /JPEG/i.test(fmt) ? "jpg" : "mov";
-        om.file = new File(folder.fsName + "/st_[#####]." + ext);
-        rq.render();
-    } catch (e) {
-        return stFail("Rendu impossible : " + e.toString());
-    } finally {
-        try { if (item) item.remove(); } catch (e2) {}
-        for (i = 0; i < queued.length; i++) { try { queued[i].render = true; } catch (e3) {} }
-        for (i = 0; i < solos.length; i++) { try { solos[i][0].solo = solos[i][1]; } catch (e4) {} }
-    }
-    return stJSON({ok: true, dir: folder.fsName, format: fmt});
-}
-
-function stFindComp(compId) {
-    var c = app.project.itemByID(compId);
-    return (c instanceof CompItem) ? c : null;
 }
 
 // Place l'instant courant de la compo sur une de ses images (aperçu synchronisé).
@@ -298,51 +196,16 @@ function stGoToFrame(compId, compFrame) {
     return stJSON({ok: true});
 }
 
-// Exécute le script généré par le moteur dans la compo. Les images clés sont datées
-// en images de cette compo ; layers : calques à créer {nul, solid, text}.
-function stApply(compId, layerIndex, jsxPath, layers) {
-    var comp = stFindComp(compId);
-    if (!comp) return stFail("Composition introuvable (supprimée ou renommée ?).");
-    comp.openInViewer();
-    for (var i = 1; i <= comp.numLayers; i++) comp.layer(i).selected = false;
-    if (layerIndex >= 1 && layerIndex <= comp.numLayers) comp.layer(layerIndex).selected = true;
-    $.global.ST_PANEL = true;
-    $.global.ST_RESULT = "";
-    $.global.ST_TIME_OFFSET = 0;
-    $.global.ST_LAYERS = layers;
-    try {
-        $.evalFile(File(jsxPath));
-    } catch (e) {
-        $.global.ST_PANEL = false;
-        $.global.ST_TIME_OFFSET = null;
-        $.global.ST_LAYERS = null;
-        return stFail("Erreur dans le script : " + e.toString() + " (ligne " + e.line + ")");
-    }
-    $.global.ST_PANEL = false;
-    $.global.ST_TIME_OFFSET = null;
-    $.global.ST_LAYERS = null;
-    var r = String($.global.ST_RESULT);
-    if (r.indexOf("ERREUR ") === 0) return stFail(r.substring(7));
-    return stJSON({ok: true, msg: r});
-}
-
-// Effet « 3D Surface Tracker » du calque (objet propriété), ou null.
-function stTrackerFx(comp, layerIndex) {
-    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return null;
-    var i = stTrackerEffect(comp.layer(layerIndex));
-    return i ? comp.layer(layerIndex).property("ADBE Effect Parade").property(i) : null;
-}
-
 // Ajoute l'effet au calque, en bas de la pile.
 function stAddTrackerEffect(compId, layerIndex) {
     var comp = stFindComp(compId);
     if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
-    var L = comp.layer(layerIndex);
-    if (!L.property("ADBE Effect Parade").canAddProperty("SurfTrack 3D Surface Tracker")) {
+    var par = comp.layer(layerIndex).property("ADBE Effect Parade");
+    if (!par.canAddProperty(ST_MATCH)) {
         return stFail("L'effet « 3D Surface Tracker » n'est pas installé (native/build.sh --install, puis redémarrer AE).");
     }
     app.beginUndoGroup("3D Surface Tracker : ajouter l'effet");
-    L.property("ADBE Effect Parade").addProperty("SurfTrack 3D Surface Tracker");
+    par.addProperty(ST_MATCH);
     app.endUndoGroup();
     return stJSON({ok: true});
 }
@@ -362,7 +225,9 @@ function stApplyTracking(compId, layerIndex, d) {
         if (vals.length === 1 || times.length === 1) p.setValue(vals[0]);
         else p.setValuesAtTimes(times, vals);
     }
+    function still(name, v) { var p = fx.property(name); clear(p); p.setValue(v); }
     function col(a, j) { var o = []; for (var q = 0; q < a.length; q++) o.push(a[q][j]); return o; }
+    var r = d.round || [0, 0, 0, 0];
     app.beginUndoGroup("3D Surface Tracker : appliquer le tracking");
     keys("Position X", col(d.srfPos, 0));
     keys("Position Y", col(d.srfPos, 1));
@@ -371,16 +236,55 @@ function stApplyTracking(compId, layerIndex, d) {
     keys("Orientation Y", col(d.srfOri, 1));
     keys("Orientation Z", col(d.srfOri, 2));
     keys("Zoom caméra", d.zoom);
-    var statics = {"Largeur": d.size[0], "Hauteur": d.size[1], "Distance caméra": -d.camPos[0][2],
-                   "Image L": d.width, "Image H": d.height};
-    for (var n in statics) if (statics.hasOwnProperty(n)) { clear(fx.property(n)); fx.property(n).setValue(statics[n]); }
-    fx.property("Forme").setValue(d.shape === "disc" ? 2 : d.shape === "free" ? 3 : 1);
-    var pts = d.outline || [];
-    fx.property("Points du contour").setValue(d.shape === "disc" ? 0 : Math.min(pts.length, 32));
-    for (i = 0; i < 32; i++) {
-        fx.property("U" + (i + 1)).setValue(i < pts.length ? pts[i][0] : 0);
-        fx.property("V" + (i + 1)).setValue(i < pts.length ? pts[i][1] : 0);
-    }
+    still("Largeur", d.size[0]);
+    still("Hauteur", d.size[1]);
+    still("Distance caméra", -d.camPos[0][2]);
+    fx.property("Forme").setValue(d.shape === "disc" ? 2 : 1);
+    still("Arrondi HG", 100 * r[0]);
+    still("Arrondi HD", 100 * r[1]);
+    still("Arrondi BD", 100 * r[2]);
+    still("Arrondi BG", 100 * r[3]);
     app.endUndoGroup();
     return stJSON({ok: true, frames: d.frames.length});
+}
+
+// ------------------------------------------------------------------ travail du panneau
+// Forme, suivi et clés sont enregistrés dans les métadonnées XMP du projet (une entrée
+// par calque) : ils sont sauvegardés avec le projet et retrouvés à la réouverture.
+var ST_NS = "http://ns.surftrack.local/1.0/";
+
+function stXMP() {
+    if (typeof XMPMeta === "undefined") {
+        if (!ExternalObject.AdobeXMPScript) ExternalObject.AdobeXMPScript = new ExternalObject("lib:AdobeXMPScript");
+    }
+    XMPMeta.registerNamespace(ST_NS, "surftrack");
+    return new XMPMeta(app.project.xmpPacket);
+}
+
+function stSessionKey(comp, L) {
+    return "L" + comp.id + "_" + (typeof L.id === "number" ? L.id : "i" + L.index);
+}
+
+function stSaveSession(compId, layerIndex, json) {
+    var comp = stFindComp(compId);
+    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
+    try {
+        var x = stXMP();
+        x.setProperty(ST_NS, stSessionKey(comp, comp.layer(layerIndex)), json);
+        app.project.xmpPacket = x.serialize();
+    } catch (e) {
+        return stFail("Enregistrement du tracking dans le projet impossible : " + e.toString());
+    }
+    return stJSON({ok: true});
+}
+
+function stLoadSession(compId, layerIndex) {
+    var comp = stFindComp(compId);
+    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
+    try {
+        var p = stXMP().getProperty(ST_NS, stSessionKey(comp, comp.layer(layerIndex)));
+        return stJSON({ok: true, data: p ? String(p.value) : null});
+    } catch (e) {
+        return stJSON({ok: true, data: null});
+    }
 }

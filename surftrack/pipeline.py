@@ -10,7 +10,7 @@ from .ellipse_track import EllipseTracker, snap_ellipse
 from .geometry import warp_points
 from .pose import (as_focals, estimate_aspect, estimate_focal, project_corners, solve_disc_poses,
                    solve_poses, stabilize_poses)
-from .scene import detect_motion_mode, estimate_plane_normal
+from .scene import detect_motion_mode
 from .tracker import PlanarTracker
 from .video import frame_count, load_gray, video_size
 
@@ -32,7 +32,7 @@ class Result:
     frame_offset: int = 0       # indice dans le fichier de la 1re image traitée
     motion_mode: str = "object"  # 'object' (la surface bouge) ou 'camera' (la caméra bouge)
     motion_why: str = ""
-    outline: object = None      # forme libre : contour en coordonnées 0..1 du rectangle
+    roundness: object = None    # arrondi des 4 coins (HG, HD, BD, BG), 0..1
     stopped: bool = False       # tracking arrêté à la demande
 
 
@@ -99,7 +99,7 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
         why = "choisi manuellement"
     return Result(W, H, clip.fps, n, track, sol["ref_corners"], sol["corners"], pose, source, surface,
                   sol["alternative"], sol["conics"], frame_offset=start, motion_mode=mode, motion_why=why,
-                  outline=sol["outline"], stopped=tracker.stopped)
+                  stopped=tracker.stopped)
 
 
 _LENS = {}
@@ -143,7 +143,7 @@ def choose_focal(video, surface, track, W, H, focal_px=None, focal_mm=None, sens
                           f"{mm.max():.1f} mm éq. 35 mm, image par image")
             else:
                 source = f"métadonnées {lens.camera} / {lens.lens} : {lens.focal35_mm:.1f} mm éq. 35 mm"
-        elif surface.kind != "free" and len(sub) >= 3:
+        elif len(sub) >= 3:
             fe = estimate_focal(seqs_for, W, H)
             if fe.reliable:
                 focal, source = fe.focal, f"estimée (±{100 * fe.rel_uncertainty:.0f} %)"
@@ -164,14 +164,14 @@ def solve(track, surface, W, H, focal, smooth=None, flip=False, normal_hint=None
     """Pose 3D de la surface dans chaque image trackée (homographie finie).
     track : TrackResult pleine résolution ; frames_small : images (niveaux de gris, à
     l'échelle track_scale) nécessaires au suivi du bord d'un disque.
-    Renvoie un dict : pose, corners, ref_corners, conics, outline, alternative."""
+    Renvoie un dict : pose, corners, ref_corners, conics, alternative."""
     if smooth is None:  # disque : calage sur le bord, on peut lisser davantage l'inclinaison
         smooth = 4.0 if surface.kind == "disc" else 2.0
     n = len(track.homographies)
     ref_frame = track.ref_index
     focal = as_focals(focal, n)
     tracked = np.isfinite(track.homographies).all(axis=(1, 2))
-    conics = alternative = outline = None
+    conics = alternative = None
     if surface.kind == "disc":  # suivi du bord, image par image
         S = np.diag([track_scale, track_scale, 1.0])
         Si = np.linalg.inv(S)
@@ -220,23 +220,6 @@ def solve(track, surface, W, H, focal, smooth=None, flip=False, normal_hint=None
             log("⚠ Inclinaison ambiguë (peu de perspective) : un second script avec l'inclinaison "
                 "inversée est aussi exporté.")
         ref_corners = corners[ref_frame]
-    elif surface.kind == "free":
-        normal, reliable, why = estimate_plane_normal(track.homographies, focal, W, H, ref_frame, surface.points)
-        if normal_hint is not None:
-            hint = np.asarray(normal_hint, float) / np.linalg.norm(normal_hint)
-            gap = np.degrees(np.arccos(np.clip(hint @ normal, -1, 1)))
-            log("Orientation de la forme : réglée dans le panneau"
-                + (f" (le mouvement suggère {why}, écart {gap:.0f}°)" if reliable else ""))
-            normal = hint
-        elif reliable:
-            log(f"Orientation de la forme : {why}")
-        else:
-            normal = np.array([0.0, 0, 1])
-            log(f"⚠ Orientation de la forme incertaine ({why}) : surface supposée face caméra sur "
-                "l'image de référence. Un rectangle ou un disque donne une orientation plus sûre.")
-        ref_corners, aspect, outline = surface.reference_rect(normal, focal[ref_frame], W, H)
-        corners = track.warp(ref_corners)
-        pose = solve_poses(corners, focal, W, H, aspect, ref_frame, tracked)
     else:
         ref_corners = surface.corners
         corners = track.warp(ref_corners)
@@ -254,8 +237,7 @@ def solve(track, surface, W, H, focal, smooth=None, flip=False, normal_hint=None
         log(f"Écart 3D / tracking 2D ({'bord du disque' if surface.kind == 'disc' else 'coins'}) : "
             f"moyenne {np.nanmean(pose.reproj_error[pose.valid]):.2f} px, "
             f"max {np.nanmax(pose.reproj_error[pose.valid]):.2f} px")
-    return dict(pose=pose, corners=corners, ref_corners=ref_corners, conics=conics, outline=outline,
-                alternative=alternative)
+    return dict(pose=pose, corners=corners, ref_corners=ref_corners, conics=conics, alternative=alternative)
 
 
 def _detect_loss(track, poly, ref_frame, min_conf=0.3, max_area_ratio=1.5):
