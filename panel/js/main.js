@@ -1052,12 +1052,15 @@
     const A = world ? { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, -1] } : { x: ax.x, y: ax.y, z: scale(ax.n, -1) };
     const o = S3(m.C);
     const g = { m, ax, o, handles: [] };
-    const dpr = DPR(), minLen = 40 * dpr;
-    /** Direction à l'écran d'un axe 3D (si l'axe vise la caméra : une diagonale de secours). */
+    const dpr = DPR(), size = 60 * dpr;  // longueur des flèches à l'écran, quel que soit le zoom
+    // pixels écran par unité 3D au centre de la surface (pour un vecteur parallèle à l'image)
+    const ppuFront = state.view.s * focalPx() / Math.max(1e-6, m.C[2]);
+    /** Direction à l'écran d'un axe 3D, ramenée à une longueur fixe. Seul un axe qui vise
+     *  vraiment la caméra (presque réduit à un point) prend une diagonale de secours. */
     const screenDir = (a, length) => {
       const e = S3(add(m.C, scale(a, length))), v = [e[0] - o[0], e[1] - o[1]], l = Math.hypot(v[0], v[1]);
-      if (l < minLen) return { v: [-0.7 * 60 * dpr, 0.7 * 60 * dpr], ppu: 60 * dpr / length };
-      return { v, ppu: l / length };
+      if (l < 0.2 * ppuFront * length) return { v: [-0.7 * size, 0.7 * size], ppu: ppuFront };
+      return { v: [v[0] / l * size, v[1] / l * size], ppu: l / length };
     };
     if (state.xform === 'move') {
       ['x', 'y', 'z'].forEach((id) => {
