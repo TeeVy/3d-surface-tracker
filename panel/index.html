@@ -92,12 +92,31 @@
           <svg class="solid" viewBox="0 0 24 24"><path d="M3 6v12l8.5-6zM12.5 6v12l8.5-6z"/></svg>
         </button>
       </div>
-      <button id="btn-key" class="tool icon" title="Clé">
-        <svg viewBox="0 0 24 24"><path id="key-path" d="M12 4l8 8-8 8-8-8z"/></svg>
-      </button>
-      <button id="btn-play" class="tool icon" title="Lecture / pause (vignettes)">
-        <svg class="solid" viewBox="0 0 24 24"><path id="play-path" d="M7 5l12 7-12 7z"/></svg>
-      </button>
+      <div class="seg">
+        <button id="btn-key-prev" class="tool icon" title="Clé précédente">
+          <svg viewBox="0 0 24 24"><path d="M15 6l6 6-6 6-6-6zM7 8l-4 4 4 4"/></svg>
+        </button>
+        <button id="btn-key" class="tool icon" title="Clé">
+          <svg viewBox="0 0 24 24"><path id="key-path" d="M12 4l8 8-8 8-8-8z"/></svg>
+        </button>
+        <button id="btn-key-next" class="tool icon" title="Clé suivante">
+          <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6-6-6zM17 8l4 4-4 4"/></svg>
+        </button>
+      </div>
+      <div class="seg">
+        <button id="btn-step-back" class="tool icon" title="Image précédente (←)">
+          <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+        </button>
+        <button id="btn-play-back" class="tool icon play" data-dir="-1" title="Lecture arrière / pause (aller-retour)">
+          <svg class="solid" viewBox="0 0 24 24"><path d="M17 5L5 12l12 7z"/></svg>
+        </button>
+        <button id="btn-play" class="tool icon play" data-dir="1" title="Lecture / pause (aller-retour)">
+          <svg class="solid" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></svg>
+        </button>
+        <button id="btn-step-fwd" class="tool icon" title="Image suivante (→)">
+          <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
       <span class="grow"></span>
       <span id="frame-label" class="frame-label mono">—</span>
     </div>

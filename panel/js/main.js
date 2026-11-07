@@ -74,6 +74,7 @@
     spaceKey: false,
     tracking: null,      // {btn, cancel}
     playTimer: null,
+    playDir: 1,          // sens de la lecture (aller-retour)
     scrubbing: false,
     undo: [], redo: [],
     pendingStamp: 0,
@@ -1433,8 +1434,17 @@
         b.title = running ? 'Arrêter le suivi (les images déjà trackées sont gardées)' : b.dataset.title;
       }
     });
-    $('btn-play').disabled = !state.n || !!state.tracking;
-    $('play-path').setAttribute('d', state.playTimer ? 'M7 5h3.5v14H7zM13.5 5H17v14h-3.5z' : 'M7 5l12 7-12 7z');
+    const PAUSE = 'M7 5h3.5v14H7zM13.5 5H17v14h-3.5z';
+    document.querySelectorAll('.play').forEach((b) => {
+      b.disabled = !state.n || !!state.tracking;
+      const path = b.querySelector('path');
+      if (!b.dataset.d) b.dataset.d = path.getAttribute('d');
+      const playing = !!state.playTimer && b.dataset.dir === String(state.playBtn);
+      path.setAttribute('d', playing ? PAUSE : b.dataset.d);
+    });
+    ['btn-step-back', 'btn-step-fwd'].forEach((id) => { $(id).disabled = !state.n || !!state.tracking; });
+    $('btn-key-prev').disabled = !state.n || !!state.tracking || nextKey(k, -1) === null;
+    $('btn-key-next').disabled = !state.n || !!state.tracking || nextKey(k, 1) === null;
     if (state.shot) $('frame-label').textContent = `${state.shot.seqStart + k}` + (k === state.ref ? ' · réf' : '');
     const badge = state.tracking ? `Suivi… image ${state.shot.seqStart + k}`
       : state.curThumbMissing ? 'Images en préparation…'
@@ -1539,12 +1549,35 @@
     state.playTimer = null;
     refresh();
   }
-  $('btn-play').addEventListener('click', () => {
-    if (state.playTimer) { stopPlay(); goTo(state.k, true); return; }
+  // lecture en aller-retour : arrivée au bout, elle repart dans l'autre sens
+  document.querySelectorAll('.play').forEach((btn) => btn.addEventListener('click', () => {
+    const dir = +btn.dataset.dir;
+    if (state.playTimer) {
+      const same = state.playBtn === dir;
+      stopPlay();
+      if (same) { goTo(state.k, true); return; }  // le bouton en cours sert de pause
+    }
+    state.playDir = state.playBtn = dir;  // playBtn : bouton lancé (il affiche la pause)
     const fps = Math.min(30, (state.shot && state.shot.compFps) || 25);
-    state.playTimer = setInterval(() => showFrame(state.k >= state.n - 1 ? 0 : state.k + 1, { fast: true }), 1000 / fps);
+    state.playTimer = setInterval(() => {
+      if (state.n < 2) return;
+      let k = state.k + state.playDir;
+      if (k < 0 || k >= state.n) { state.playDir = -state.playDir; k = state.k + state.playDir; }
+      showFrame(k, { fast: true });
+    }, 1000 / fps);
     refresh();
-  });
+  }));
+  const step = (d) => { if (state.n && !state.tracking) { stopPlay(); goTo(Math.max(0, Math.min(state.n - 1, state.k + d)), true); } };
+  $('btn-step-back').addEventListener('click', () => step(-1));
+  $('btn-step-fwd').addEventListener('click', () => step(1));
+  /** Aller à la clé (ou à la référence) précédente / suivante. */
+  const jumpKey = (d) => {
+    if (!state.n || state.tracking) return;
+    const kk = nextKey(state.k, d);
+    if (kk !== null) { stopPlay(); goTo(kk, true); }
+  };
+  $('btn-key-prev').addEventListener('click', () => jumpKey(-1));
+  $('btn-key-next').addEventListener('click', () => jumpKey(1));
 
   // ------------------------------------------------------------------ suivi
   /** Suivi depuis l'image affichée : une image, ou jusqu'à la clé suivante (ou au bout) ;

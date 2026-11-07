@@ -45,7 +45,10 @@ Dans le Terminal, depuis ce dossier :
    placé au-dessus est pris en compte, sans précomposer. Remappages et étirements du calque aussi.
    Le panneau (*Fenêtre > Extensions > 3D Surface Tracker (panneau)*) ne fonctionne qu'avec l'effet :
    sur un calque qui ne l'a pas, il propose de l'ajouter.
-2. **Image de référence** : cliquez ou glissez dans la timeline (← → ; Maj : 10 images) jusqu'à une
+2. **Navigation** : sous l'image, trois groupes de boutons : suivi, clés (clé précédente, poser /
+   retirer, clé suivante) et lecture (image précédente, lecture arrière, lecture, image suivante ; la
+   lecture fait l'aller-retour).
+   **Image de référence** : cliquez ou glissez dans la timeline (← → ; Maj : 10 images) jusqu'à une
    image nette où la surface est bien visible. Avant tout suivi, l'image où vous relâchez devient la
    référence (triangle jaune).
 3. **Surface** : cliquez ses 4 coins, au plus près des vrais coins (la loupe aide) : ils donnent à la
