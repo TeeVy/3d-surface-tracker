@@ -69,13 +69,15 @@ Dans le Terminal, depuis ce dossier :
    **clé** (◆ dans la timeline). La forme y est imposée et le suivi est corrigé progressivement entre
    les clés voisines. Vous pouvez aussi retracker depuis la clé jusqu'à la clé suivante. Le bouton ◆
    pose une clé sur l'image affichée, ou la retire.
-6. **Appliquer le tracking** : la pose est écrite en images clés dans l'effet. Le travail du panneau
-   (forme, suivi, clés) est enregistré dans le projet : en rouvrant le tracker sur ce calque, on le
-   retrouve tel quel.
+6. **Appliquer le tracking** : la pose est écrite en images clés dans l'effet. C'est le seul
+   enregistrement : le tracking appartient à l'effet. En rouvrant le tracker, il est reconstruit à
+   partir de ses données (les corrections faites par clés y sont déjà intégrées) ; ce qui n'a pas été
+   appliqué est perdu à la fermeture du panneau.
 
 **L'effet**, dans l'ordre : *Tracker* (ouvrir le panneau), *Afficher la grille* (grille 3D dans la
 fenêtre de composition quand l'effet est sélectionné), *Données du tracking* (seules la position et
-l'orientation sont animées, et le zoom si l'objectif zoome ; le reste décrit la surface et la caméra),
+l'orientation sont animées, et le zoom si l'objectif zoome ; le reste décrit la surface, la caméra,
+le mode 2D/3D et l'image de référence),
 *Créer* : un null, un solide ou un texte posé sur la surface, avec sa caméra. Ces calques sont liés à
 l'effet par expressions et suivent un nouveau tracking appliqué.
 

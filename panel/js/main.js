@@ -6,9 +6,9 @@
  * Il parle à After Effects via ExtendScript (jsx/host.jsx).
  *
  * Le panneau garde l'état complet (forme, homographies image par image, clés de correction) :
- * chaque action peut être annulée (⌘Z), et ce travail est enregistré dans le projet (XMP)
- * pour être retrouvé à la réouverture. Le moteur ne sert qu'à charger les images, suivre et
- * calculer la pose.
+ * chaque action peut être annulée (⌘Z). Le tracking n'est enregistré qu'en l'appliquant à
+ * l'effet ; en rouvrant le tracker, il est reconstruit à partir des données de l'effet. Le
+ * moteur ne sert qu'à charger les images, suivre et calculer la pose.
  *
  * Hors d'After Effects (navigateur), il passe en mode démo avec un moteur simulé.
  */
@@ -343,7 +343,7 @@
       state.lensMm = info.lens ? info.lens.focal35_mm : null;
       $('focal-wrap').classList.toggle('hidden', !!state.lensMm);
       enable('s-surface', true);
-      await restoreSession();
+      await restoreFromEffect();
       await loadFull(state.k);
       fitView();
     } catch (e) {
@@ -353,45 +353,45 @@
     }
   }
 
-  // ------------------------------------------------------------------ travail enregistré dans le projet
-  /** Données à enregistrer : images repérées par leur numéro dans la compo (robuste si le calque est raccourci). */
-  function sessionData() {
-    const off = state.shot.seqStart, num = (v) => Number(v.toPrecision(9));
-    const byFrame = (o, f) => { const r = {}; Object.keys(o).forEach((k) => { r[+k + off] = f(o[k]); }); return r; };
-    return {
-      v: 1, ref: state.ref + off, points: state.points, round: state.round, flip: state.flip, mode2d: state.mode2d,
-      focal: $('in-focal').value, Hs: byFrame(state.Hs, (h) => h.map(num)), keys: byFrame(state.keys, (h) => h.map(num)),
-      conf: byFrame(state.conf, (c) => Math.round(c * 100) / 100),
-    };
-  }
-
-  let saveTimer = null;
-  function scheduleSave(now) {
-    if (!inCEP || !state.shot || state.tracking) return;
-    clearTimeout(saveTimer);
-    const save = () => host('stSaveSession', state.shot.compId, state.shot.layerIndex, JSON.stringify(sessionData()))
-      .then((r) => { if (!r.ok) log(r.msg); });
-    if (now) save(); else saveTimer = setTimeout(save, 1500);
-  }
-
-  /** Reprend le travail enregistré pour ce calque, s'il y en a un. */
-  async function restoreSession() {
-    const r = await host('stLoadSession', state.shot.compId, state.shot.layerIndex);
+  // ------------------------------------------------------------------ tracking déjà appliqué
+  /** Rouvre le tracking enregistré dans l'effet : la pose de chaque image clé redonne les coins
+   *  de la surface, donc son suivi (homographie depuis l'image de référence). */
+  async function restoreFromEffect() {
+    const r = await host('stReadTracking', state.shot.compId, state.shot.layerIndex);
     if (!r.ok || !r.data) return;
-    let d;
-    try { d = JSON.parse(r.data); } catch (e) { return; }
-    const off = state.shot.seqStart, inRange = (f) => f - off >= 0 && f - off < state.n;
-    const byK = (o) => { const out = {}; Object.keys(o || {}).forEach((f) => { if (inRange(+f)) out[+f - off] = o[f]; }); return out; };
-    if (!Array.isArray(d.points) || d.points.length !== 4 || !inRange(d.ref)) return;
+    const d = r.data, off = state.shot.seqStart, W = state.W, H = state.H, [w, h] = d.size;
+    const corners = ([, px, py, pz, ox, oy, oz, zoom]) => {
+      const R = eulerXYZ(ox, oy, oz), t = [px - W / 2, py - H / 2, pz + d.dist];
+      return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => {
+        const p = [a * w / 2, b * h / 2, 0];
+        const X = [0, 1, 2].map((i) => R[3 * i] * p[0] + R[3 * i + 1] * p[1] + t[i]);
+        return [W / 2 + zoom * X[0] / X[2], H / 2 + zoom * X[1] / X[2]];
+      });
+    };
+    const rows = d.frames.filter((row) => row[0] - off >= 0 && row[0] - off < state.n);
+    if (!rows.length) return;
+    const refRow = rows.find((row) => row[0] === d.ref) || rows[0];
+    const refC = corners(refRow), Hs = {}, conf = {};
+    rows.forEach((row) => { const Hk = fitH(refC, corners(row)); if (Hk) { Hs[row[0] - off] = Hk; conf[row[0] - off] = 1; } });
     Object.assign(state, {
-      points: d.points, round: d.round || [0, 0, 0, 0], flip: !!d.flip, mode2d: !!d.mode2d, ref: d.ref - off,
-      Hs: byK(d.Hs), keys: byK(d.keys), conf: byK(d.conf),
+      points: refC, round: d.disc ? [100, 100, 100, 100] : d.round.map((x) => Math.round(x)), flip: false,
+      mode2d: d.mode2d, ref: refRow[0] - off, Hs, keys: {}, conf,
     });
     state.k = state.ref;
-    $('in-focal').value = d.focal || '';
+    if (!state.lensMm) $('in-focal').value = (refRow[7] / Math.max(W, H) * 36).toFixed(1);  // focale saisie à l'époque
     syncControls();
-    changed(true);
-    log('Tracking retrouvé dans le projet.');
+    changed();
+    log(`Tracking de l'effet repris : ${rows.length} images.`);
+  }
+
+  /** Orientation AE (degrés, R = Rx · Ry · Rz) -> matrice 3x3 à plat. */
+  function eulerXYZ(ax, ay, az) {
+    const r = Math.PI / 180, [a, b, c] = [ax * r, ay * r, az * r];
+    const Rx = [1, 0, 0, 0, Math.cos(a), -Math.sin(a), 0, Math.sin(a), Math.cos(a)];
+    const Ry = [Math.cos(b), 0, Math.sin(b), 0, 1, 0, -Math.sin(b), 0, Math.cos(b)];
+    const Rz = [Math.cos(c), -Math.sin(c), 0, Math.sin(c), Math.cos(c), 0, 0, 0, 1];
+    const mul = (A, B) => { const o = []; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) o.push(A[3 * i] * B[j] + A[3 * i + 1] * B[3 + j] + A[3 * i + 2] * B[6 + j]); return o; };
+    return mul(mul(Rx, Ry), Rz);
   }
 
   // ------------------------------------------------------------------ images
@@ -729,11 +729,10 @@
     restore(state.redo.pop());
   }
 
-  /** Une modification a eu lieu : la pose est à recalculer, le travail à enregistrer. */
-  function changed(noSave) {
+  /** Une modification a eu lieu : la pose est à recalculer. */
+  function changed() {
     state.rev++;
     scheduleSolve();
-    if (!noSave) scheduleSave();
   }
 
   function syncControls() {
@@ -1579,8 +1578,8 @@
     const r = state.pose;
     if (!r || !r.ae || !inCEP) return;
     $('btn-apply').disabled = true;
-    const out = await host('stApplyTracking', state.shot.compId, state.shot.layerIndex, r.ae);
-    scheduleSave(true);
+    const out = await host('stApplyTracking', state.shot.compId, state.shot.layerIndex,
+      Object.assign({}, r.ae, { mode2d: state.mode2d, refFrame: state.shot.seqStart + state.ref }));
     refresh();
     const box = $('apply-msg');
     box.classList.remove('hidden');

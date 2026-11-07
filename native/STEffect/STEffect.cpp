@@ -5,9 +5,10 @@
       qu'elle arrive à l'effet (effets placés au-dessus compris), via le pont STBridge.
     - « Afficher la grille » : grille 3D de la surface dans la fenêtre de composition quand
       l'effet est sélectionné.
-    - « Données du tracking » : le panneau y écrit le résultat (« Appliquer le tracking »).
-      Seules la position et l'orientation sont animées (et le zoom si l'objectif zoome) ; le
-      reste décrit la surface et la caméra.
+    - « Données du tracking » : le panneau y écrit le résultat (« Appliquer le tracking ») et
+      le relit en rouvrant le tracker. Seules la position et l'orientation sont animées (et le
+      zoom si l'objectif zoome) ; le reste décrit la surface, la caméra, le mode et l'image de
+      référence.
     - « Créer » : null, solide ou texte posé sur la surface (lié par expressions aux données :
       il suit un nouveau tracking appliqué), et la caméra si besoin.
 
@@ -34,7 +35,7 @@
 #include <vector>
 
 #define MAJOR_VERSION 1
-#define MINOR_VERSION 2
+#define MINOR_VERSION 3
 #define BUG_VERSION 0
 #define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 1
@@ -50,6 +51,7 @@ enum {
     ST_ZOOM, ST_DIST,
     ST_SHAPE,
     ST_R_HG, ST_R_HD, ST_R_BD, ST_R_BG,
+    ST_MODE, ST_REF,
     ST_DATA_END,
     ST_NEW_START,
     ST_NEW_NULL, ST_NEW_SOLID, ST_NEW_TEXT,
@@ -62,7 +64,7 @@ enum {
     ID_OPEN = 1, ID_SHOW, ID_DATA_START,
     ID_POS_X, ID_POS_Y, ID_POS_Z, ID_ORI_X, ID_ORI_Y, ID_ORI_Z, ID_WIDTH, ID_HEIGHT, ID_ZOOM, ID_DIST,
     ID_SHAPE, ID_R_HG, ID_R_HD, ID_R_BD, ID_R_BG, ID_DATA_END,
-    ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END
+    ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END, ID_MODE, ID_REF
 };
 
 enum { SHAPE_RECT = 1, SHAPE_DISC };
@@ -127,6 +129,11 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
     const char* rnames[] = {"Arrondi HG", "Arrondi HD", "Arrondi BD", "Arrondi BG"};
     const A_long rids[] = {ID_R_HG, ID_R_HD, ID_R_BD, ID_R_BG};
     for (int i = 0; i < 4 && !err; i++) err = AddSlider(in_data, rnames[i], rids[i], 0, 100);
+    if (err) return err;
+    // pour rouvrir le tracker sur ce tracking : mode et image de référence (n° d'image de la compo)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_POPUP("Mode", 2, 1, "3D|2D", ID_MODE);
+    err = AddSlider(in_data, "Image de référence", ID_REF, 0, 1000000);
     if (err) return err;
     AEFX_CLR_STRUCT(def);
     PF_END_TOPIC(ID_DATA_END);

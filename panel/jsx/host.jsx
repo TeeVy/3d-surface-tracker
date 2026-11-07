@@ -3,8 +3,8 @@
 //
 // Le calque tracké porte l'effet « 3D Surface Tracker » : le panneau suit l'image telle
 // qu'elle arrive à cet effet (calculée par After Effects, via le pont STBridge), écrit le
-// résultat dans les paramètres de l'effet, et enregistre son travail (forme, suivi, clés)
-// dans les métadonnées XMP du projet pour le retrouver à la réouverture.
+// résultat dans les paramètres de l'effet (« Appliquer le tracking ») et le relit en
+// rouvrant le tracker : le tracking appartient à l'effet.
 
 function stJSON(v) {
     if (v === null || v === undefined) return "null";
@@ -203,7 +203,8 @@ function stAddTrackerEffect(compId, layerIndex) {
 }
 
 // Écrit le tracking dans l'effet du calque : images clés de la pose (pixels de l'image du
-// calque) ; d : données build_ae_data du moteur. Les clés précédentes sont remplacées.
+// calque) ; d : données build_ae_data du moteur, plus mode2d et refFrame (n° d'image de la
+// compo) pour rouvrir le tracker. Les clés précédentes sont remplacées.
 function stApplyTracking(compId, layerIndex, d) {
     var comp = stFindComp(compId);
     var fx = stTrackerFx(comp, layerIndex);
@@ -236,47 +237,36 @@ function stApplyTracking(compId, layerIndex, d) {
     still("Arrondi HD", 100 * r[1]);
     still("Arrondi BD", 100 * r[2]);
     still("Arrondi BG", 100 * r[3]);
+    fx.property("Mode").setValue(d.mode2d ? 2 : 1);
+    still("Image de référence", d.refFrame);
     app.endUndoGroup();
     return stJSON({ok: true, frames: d.frames.length});
 }
 
-// ------------------------------------------------------------------ travail du panneau
-// Forme, suivi et clés sont enregistrés dans les métadonnées XMP du projet (une entrée
-// par calque) : ils sont sauvegardés avec le projet et retrouvés à la réouverture.
-var ST_NS = "http://ns.surftrack.local/1.0/";
-
-function stXMP() {
-    if (typeof XMPMeta === "undefined") {
-        if (!ExternalObject.AdobeXMPScript) ExternalObject.AdobeXMPScript = new ExternalObject("lib:AdobeXMPScript");
-    }
-    XMPMeta.registerNamespace(ST_NS, "surftrack");
-    return new XMPMeta(app.project.xmpPacket);
-}
-
-function stSessionKey(comp, L) {
-    return "L" + comp.id + "_" + (typeof L.id === "number" ? L.id : "i" + L.index);
-}
-
-function stSaveSession(compId, layerIndex, json) {
+// Tracking déjà appliqué dans l'effet, pour rouvrir le tracker dessus : pose aux images
+// clés (numéros d'image de la compo) et réglages fixes. null s'il n'y en a pas.
+function stReadTracking(compId, layerIndex) {
     var comp = stFindComp(compId);
-    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
-    try {
-        var x = stXMP();
-        x.setProperty(ST_NS, stSessionKey(comp, comp.layer(layerIndex)), json);
-        app.project.xmpPacket = x.serialize();
-    } catch (e) {
-        return stFail("Enregistrement du tracking dans le projet impossible : " + e.toString());
+    var fx = stTrackerFx(comp, layerIndex);
+    if (!fx) return stFail("L'effet « 3D Surface Tracker » est absent du calque.");
+    function v(name) { return fx.property(name).valueAtTime(0, false); }
+    if (v("Largeur") <= 0) return stJSON({ok: true, data: null});
+    var fd = comp.frameDuration, px = fx.property("Position X"), times = [], i;
+    if (px.numKeys === 0) times.push(v("Image de référence") * fd);
+    for (i = 1; i <= px.numKeys; i++) times.push(px.keyTime(i));
+    var names = ["Position X", "Position Y", "Position Z", "Orientation X", "Orientation Y", "Orientation Z", "Zoom caméra"];
+    var props = [];
+    for (i = 0; i < names.length; i++) props.push(fx.property(names[i]));
+    var frames = [];
+    for (i = 0; i < times.length; i++) {
+        var row = [Math.round(times[i] / fd)];
+        for (var j = 0; j < props.length; j++) row.push(props[j].valueAtTime(times[i], false));
+        frames.push(row);  // [image, px, py, pz, ox, oy, oz, zoom]
     }
-    return stJSON({ok: true});
-}
-
-function stLoadSession(compId, layerIndex) {
-    var comp = stFindComp(compId);
-    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
-    try {
-        var p = stXMP().getProperty(ST_NS, stSessionKey(comp, comp.layer(layerIndex)));
-        return stJSON({ok: true, data: p ? String(p.value) : null});
-    } catch (e) {
-        return stJSON({ok: true, data: null});
-    }
+    return stJSON({ok: true, data: {
+        frames: frames, size: [v("Largeur"), v("Hauteur")], dist: v("Distance caméra"),
+        disc: fx.property("Forme").value === 2, mode2d: fx.property("Mode").value === 2,
+        ref: Math.round(v("Image de référence")),
+        round: [v("Arrondi HG"), v("Arrondi HD"), v("Arrondi BD"), v("Arrondi BG")]
+    }});
 }
