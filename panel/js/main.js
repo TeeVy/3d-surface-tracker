@@ -40,7 +40,7 @@
 
   // ------------------------------------------------------------------ état
   const state = {
-    shot: null,          // calque chargé (réponse de stGetLayer / stGetSelection)
+    shot: null,          // calque chargé (réponse de stGetLayer)
     eng: null,           // session du moteur
     lensMm: null,        // focale des métadonnées (éq. 35 mm), si présente
     workDir: null,
@@ -323,7 +323,6 @@
     $('apply-msg').classList.add('hidden');
     $('log').textContent = '';
 
-    $('btn-load').disabled = true;
     try {
       if (!(await bridgeAvailable())) {
         throw new Error('Pont After Effects absent : installez les plug-ins (native/build.sh --install) puis redémarrez After Effects.');
@@ -350,7 +349,6 @@
     } catch (e) {
       toast(e.message, 12000);
     } finally {
-      $('btn-load').disabled = false;
       refresh();
     }
   }
@@ -1593,8 +1591,6 @@
       : out.msg;
   });
 
-  $('btn-load').addEventListener('click', () => host('stGetSelection').then(loadShot));
-
   // ------------------------------------------------------------------ démarrage
   state.xform = recall('xform', 'move');
   state.space = recall('space', 'local');
@@ -1602,7 +1598,6 @@
   if (!inCEP) {
     // aperçu dans un navigateur : moteur simulé, toutes les images = demo.jpg
     $('shot-empty').textContent = 'Mode démo (hors After Effects) : suivi simulé.';
-    $('btn-load').disabled = true;
     loadImg('demo.jpg').then((img) => {
       state.W = img.width; state.H = img.height; state.n = 60;
       state.shot = { seqStart: 0, compFps: 25 };

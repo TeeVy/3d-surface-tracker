@@ -41,14 +41,6 @@ function stIsVideoFootage(src) {
            !src.mainSource.isStill && src.hasVideo;
 }
 
-// Calque sélectionné dans la composition active (bouton ↻ du panneau).
-function stGetSelection() {
-    var comp = app.project.activeItem;
-    if (!(comp instanceof CompItem)) return stFail("Ouvrez la composition et sélectionnez le calque à tracker.");
-    if (comp.selectedLayers.length === 0) return stFail("Sélectionnez le calque à tracker dans la composition.");
-    return stDescribe(comp, comp.selectedLayers[0], comp.time);
-}
-
 // Calque désigné par le bouton de l'effet (compo, indice, instant ; instant < 0 : celui de la compo).
 function stGetLayer(compId, layerIndex, time) {
     var comp = stFindComp(compId);
