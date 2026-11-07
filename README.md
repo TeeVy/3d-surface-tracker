@@ -69,7 +69,9 @@ Dans le Terminal, depuis ce dossier :
    **clé** (◆ dans la timeline). La forme y est imposée et le suivi est corrigé progressivement entre
    les clés voisines. Vous pouvez aussi retracker depuis la clé jusqu'à la clé suivante. Le bouton ◆
    pose une clé sur l'image affichée ; pour en retirer une : ◆, Suppr, ou clic droit sur son losange.
-   Les clés sont enregistrées avec le tracking (paramètre « Clés de correction » de l'effet).
+   Les clés sont enregistrées avec le tracking (paramètre « Clés de correction » de l'effet, et leur
+   correction dans le sous-groupe « Corrections ») : en rouvrant le tracker, on retrouve le suivi brut
+   et les clés par-dessus, et retirer une clé annule bien sa correction.
 6. **Appliquer le tracking** : la pose est écrite en images clés dans l'effet. C'est le seul
    enregistrement : le tracking appartient à l'effet. En rouvrant le tracker, il est reconstruit à
    partir de ses données (les corrections faites par clés y sont déjà intégrées) ; ce qui n'a pas été

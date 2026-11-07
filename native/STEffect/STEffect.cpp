@@ -35,7 +35,7 @@
 #include <vector>
 
 #define MAJOR_VERSION 1
-#define MINOR_VERSION 4
+#define MINOR_VERSION 5
 #define BUG_VERSION 0
 #define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 1
@@ -52,6 +52,7 @@ enum {
     ST_SHAPE,
     ST_R_HG, ST_R_HD, ST_R_BD, ST_R_BG,
     ST_MODE, ST_REF, ST_KEYS,
+    ST_CORR_START, ST_CORR, ST_CORR_END = ST_CORR + 8,
     ST_DATA_END,
     ST_NEW_START,
     ST_NEW_NULL, ST_NEW_SOLID, ST_NEW_TEXT,
@@ -64,7 +65,8 @@ enum {
     ID_OPEN = 1, ID_SHOW, ID_DATA_START,
     ID_POS_X, ID_POS_Y, ID_POS_Z, ID_ORI_X, ID_ORI_Y, ID_ORI_Z, ID_WIDTH, ID_HEIGHT, ID_ZOOM, ID_DIST,
     ID_SHAPE, ID_R_HG, ID_R_HD, ID_R_BD, ID_R_BG, ID_DATA_END,
-    ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END, ID_MODE, ID_REF, ID_KEYS
+    ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END, ID_MODE, ID_REF, ID_KEYS, ID_CORR_START, ID_CORR_END,
+    ID_CORR = 200
 };
 
 enum { SHAPE_RECT = 1, SHAPE_DISC };
@@ -138,6 +140,20 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
     // une image clé AE par clé de correction posée dans le tracker (et sur la référence)
     AEFX_CLR_STRUCT(def);
     PF_ADD_CHECKBOXX("Clés de correction", FALSE, 0, ID_KEYS);
+    // décalage des 4 coins (HG, HD, BD, BG) que chaque clé applique au suivi brut, aux images
+    // des clés : permet de retrouver le suivi brut, et donc de retirer une clé, en rouvrant le tracker
+    AEFX_CLR_STRUCT(def);
+    def.flags = PF_ParamFlag_START_COLLAPSED;
+    PF_ADD_TOPIC("Corrections", ID_CORR_START);
+    const char* corners[] = {"HG", "HD", "BD", "BG"};
+    for (int i = 0; i < 8 && !err; i++) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "Correction %s %s", corners[i / 2], i % 2 ? "Y" : "X");
+        err = AddSlider(in_data, name, ID_CORR + i);
+    }
+    if (err) return err;
+    AEFX_CLR_STRUCT(def);
+    PF_END_TOPIC(ID_CORR_END);
     AEFX_CLR_STRUCT(def);
     PF_END_TOPIC(ID_DATA_END);
 

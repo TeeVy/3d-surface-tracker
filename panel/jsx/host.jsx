@@ -244,6 +244,14 @@ function stApplyTracking(compId, layerIndex, d) {
     clear(kp);
     for (i = 0; i < d.keyFrames.length; i++) { kt.push(d.keyFrames[i] * fd); kv.push(1); }
     kp.setValuesAtTimes(kt, kv);
+    // correction de chaque clé : décalage des 4 coins par rapport au suivi brut (8 valeurs)
+    var CN = ["HG", "HD", "BD", "BG"];
+    for (var c = 0; c < 8; c++) {
+        var cp = fx.property("Correction " + CN[c >> 1] + (c % 2 ? " Y" : " X")), cv = [];
+        clear(cp);
+        for (i = 0; i < d.keyFrames.length; i++) cv.push(d.keyDeltas[i][c]);
+        cp.setValuesAtTimes(kt, cv);
+    }
     app.endUndoGroup();
     return stJSON({ok: true, frames: d.frames.length});
 }
@@ -252,6 +260,17 @@ function stApplyTracking(compId, layerIndex, d) {
 function stKeyFrames(p, fd) {
     var out = [];
     for (var i = 1; i <= p.numKeys; i++) out.push(Math.round(p.keyTime(i) / fd));
+    return out;
+}
+
+// Correction de chaque clé (8 valeurs : décalage des coins HG, HD, BD, BG), dans l'ordre des clés.
+function stKeyDeltas(fx, keysProp) {
+    var CN = ["HG", "HD", "BD", "BG"], out = [];
+    for (var i = 1; i <= keysProp.numKeys; i++) {
+        var t = keysProp.keyTime(i), row = [];
+        for (var c = 0; c < 8; c++) row.push(fx.property("Correction " + CN[c >> 1] + (c % 2 ? " Y" : " X")).valueAtTime(t, false));
+        out.push(row);
+    }
     return out;
 }
 
@@ -279,6 +298,7 @@ function stReadTracking(compId, layerIndex) {
         frames: frames, size: [v("Largeur"), v("Hauteur")], dist: v("Distance caméra"),
         disc: fx.property("Forme").value === 2, mode2d: fx.property("Mode").value === 2,
         ref: Math.round(v("Image de référence")), keys: stKeyFrames(fx.property("Clés de correction"), fd),
+        keyDeltas: stKeyDeltas(fx, fx.property("Clés de correction")),
         round: [v("Arrondi HG"), v("Arrondi HD"), v("Arrondi BD"), v("Arrondi BG")]
     }});
 }

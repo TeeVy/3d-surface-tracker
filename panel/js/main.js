@@ -381,13 +381,35 @@
     const rows = d.frames.filter((row) => row[0] - off >= 0 && row[0] - off < state.n);
     if (!rows.length) return;
     const refRow = rows.find((row) => row[0] === d.ref) || rows[0];
-    const refC = corners(refRow), Hs = {}, conf = {};
-    rows.forEach((row) => { const Hk = fitH(refC, corners(row)); if (Hk) { Hs[row[0] - off] = Hk; conf[row[0] - off] = 1; } });
+    // coins enregistrés (suivi corrigé par les clés) à chaque image
+    const ref = refRow[0] - off, refC = corners(refRow), eff = {};
+    rows.forEach((row) => { eff[row[0] - off] = corners(row); });
+    // clés et leur correction (décalage des 4 coins) ; la référence n'a pas de correction
+    const delta = { [ref]: [[0, 0], [0, 0], [0, 0], [0, 0]] };
+    (d.keys || []).forEach((f, i) => {
+      const k = f - off, c = (d.keyDeltas || [])[i];
+      if (k !== ref && eff[k] && c) delta[k] = [[c[0], c[1]], [c[2], c[3]], [c[4], c[5]], [c[6], c[7]]];
+    });
+    const keyKs = Object.keys(delta).map(Number).sort((a, b) => a - b);
+    // suivi brut = suivi corrigé moins la correction, répartie entre clés voisines comme dans effH
+    const Hs = {}, conf = {}, keys = {};
+    Object.keys(eff).map(Number).forEach((k) => {
+      let kp = null, kn = null;
+      keyKs.forEach((kk) => { if (kk <= k) kp = kk; else if (kn === null) kn = kk; });
+      const w = kp !== null && kn !== null ? (k - kp) / (kn - kp) : kp !== null ? 0 : 1;
+      const raw = eff[k].map((p, i) => {
+        let dx = 0, dy = 0;
+        if (kp !== null) { dx += (1 - w) * delta[kp][i][0]; dy += (1 - w) * delta[kp][i][1]; }
+        if (kn !== null) { dx += w * delta[kn][i][0]; dy += w * delta[kn][i][1]; }
+        return [p[0] - dx, p[1] - dy];
+      });
+      const Hk = fitH(refC, raw);
+      if (Hk) { Hs[k] = Hk; conf[k] = 1; }
+      if (k !== ref && delta[k]) keys[k] = fitH(refC, eff[k]);
+    });
     Object.assign(state, {
       points: refC, round: d.disc ? [100, 100, 100, 100] : d.round.map((x) => Math.round(x)), flip: false,
-      mode2d: d.mode2d, ref: refRow[0] - off, Hs, conf,
-      // clés de correction : la forme enregistrée à ces images y est de nouveau imposée
-      keys: (d.keys || []).reduce((o, f) => { const k = f - off; if (k !== refRow[0] - off && Hs[k]) o[k] = Hs[k]; return o; }, {}),
+      mode2d: d.mode2d, ref, Hs, conf, keys,
     });
     state.k = state.ref;
     if (!state.lensMm) $('in-focal').value = (refRow[7] / Math.max(W, H) * 36).toFixed(1);  // focale saisie à l'époque
@@ -658,6 +680,14 @@
     }
     effCache.map.set(k, H);
     return H;
+  }
+  /** Correction d'une clé : décalage de ses 4 coins (HG, HD, BD, BG) par rapport au suivi brut, à plat. */
+  function keyDelta(k) {
+    if (k === state.ref || !state.Hs[k]) return [0, 0, 0, 0, 0, 0, 0, 0];
+    return [].concat(...orderRect(state.points).map((p) => {
+      const a = warp9(keyH(k), p), b = warp9(state.Hs[k], p);
+      return [a[0] - b[0], a[1] - b[1]];
+    }));
   }
   /** Prochaine clé après k dans le sens d (null s'il n'y en a pas). */
   function nextKey(k, d) {
@@ -1611,6 +1641,7 @@
       Object.assign({}, r.ae, {
         mode2d: state.mode2d, refFrame: state.shot.seqStart + state.ref,
         keyFrames: keyFrames().map((k) => state.shot.seqStart + k),
+        keyDeltas: keyFrames().map(keyDelta),
       }));
     refresh();
     const box = $('apply-msg');
