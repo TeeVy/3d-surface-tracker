@@ -35,7 +35,7 @@
 #include <vector>
 
 #define MAJOR_VERSION 1
-#define MINOR_VERSION 3
+#define MINOR_VERSION 4
 #define BUG_VERSION 0
 #define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 1
@@ -51,7 +51,7 @@ enum {
     ST_ZOOM, ST_DIST,
     ST_SHAPE,
     ST_R_HG, ST_R_HD, ST_R_BD, ST_R_BG,
-    ST_MODE, ST_REF,
+    ST_MODE, ST_REF, ST_KEYS,
     ST_DATA_END,
     ST_NEW_START,
     ST_NEW_NULL, ST_NEW_SOLID, ST_NEW_TEXT,
@@ -64,7 +64,7 @@ enum {
     ID_OPEN = 1, ID_SHOW, ID_DATA_START,
     ID_POS_X, ID_POS_Y, ID_POS_Z, ID_ORI_X, ID_ORI_Y, ID_ORI_Z, ID_WIDTH, ID_HEIGHT, ID_ZOOM, ID_DIST,
     ID_SHAPE, ID_R_HG, ID_R_HD, ID_R_BD, ID_R_BG, ID_DATA_END,
-    ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END, ID_MODE, ID_REF
+    ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END, ID_MODE, ID_REF, ID_KEYS
 };
 
 enum { SHAPE_RECT = 1, SHAPE_DISC };
@@ -135,6 +135,9 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
     PF_ADD_POPUP("Mode", 2, 1, "3D|2D", ID_MODE);
     err = AddSlider(in_data, "Image de référence", ID_REF, 0, 1000000);
     if (err) return err;
+    // une image clé AE par clé de correction posée dans le tracker (et sur la référence)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_CHECKBOXX("Clés de correction", FALSE, 0, ID_KEYS);
     AEFX_CLR_STRUCT(def);
     PF_END_TOPIC(ID_DATA_END);
 

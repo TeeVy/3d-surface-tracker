@@ -68,7 +68,8 @@ Dans le Terminal, depuis ce dossier :
 5. **Corriger** : si la forme dérive sur une image, retouchez-la (coins, côtés, gizmo) : ça pose une
    **clé** (◆ dans la timeline). La forme y est imposée et le suivi est corrigé progressivement entre
    les clés voisines. Vous pouvez aussi retracker depuis la clé jusqu'à la clé suivante. Le bouton ◆
-   pose une clé sur l'image affichée, ou la retire.
+   pose une clé sur l'image affichée ; pour en retirer une : ◆, Suppr, ou clic droit sur son losange.
+   Les clés sont enregistrées avec le tracking (paramètre « Clés de correction » de l'effet).
 6. **Appliquer le tracking** : la pose est écrite en images clés dans l'effet. C'est le seul
    enregistrement : le tracking appartient à l'effet. En rouvrant le tracker, il est reconstruit à
    partir de ses données (les corrections faites par clés y sont déjà intégrées) ; ce qui n'a pas été

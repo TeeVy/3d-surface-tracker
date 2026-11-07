@@ -385,7 +385,9 @@
     rows.forEach((row) => { const Hk = fitH(refC, corners(row)); if (Hk) { Hs[row[0] - off] = Hk; conf[row[0] - off] = 1; } });
     Object.assign(state, {
       points: refC, round: d.disc ? [100, 100, 100, 100] : d.round.map((x) => Math.round(x)), flip: false,
-      mode2d: d.mode2d, ref: refRow[0] - off, Hs, keys: {}, conf,
+      mode2d: d.mode2d, ref: refRow[0] - off, Hs, conf,
+      // clés de correction : la forme enregistrée à ces images y est de nouveau imposée
+      keys: (d.keys || []).reduce((o, f) => { const k = f - off; if (k !== refRow[0] - off && Hs[k]) o[k] = Hs[k]; return o; }, {}),
     });
     state.k = state.ref;
     if (!state.lensMm) $('in-focal').value = (refRow[7] / Math.max(W, H) * 36).toFixed(1);  // focale saisie à l'époque
@@ -1279,7 +1281,10 @@
     const k = ev.key.toLowerCase();
     if (!mod && (k === 'w' || k === 'e' || k === 'r')) { setXform({ w: 'move', e: 'rotate', r: 'scale' }[k]); ev.preventDefault(); }
     if (!mod && k === 'x') { setSpace(state.space === 'local' ? 'world' : 'local'); ev.preventDefault(); }
-    if ((ev.key === 'Backspace' || ev.key === 'Delete') && editable() && onRef() && state.points.length) {
+    if ((ev.key === 'Backspace' || ev.key === 'Delete') && state.keys[state.k] && !state.tracking) {
+      removeKey(state.k);  // sur une clé : la supprimer
+      ev.preventDefault();
+    } else if ((ev.key === 'Backspace' || ev.key === 'Delete') && editable() && onRef() && state.points.length) {
       act(() => { state.points.pop(); });
       ev.preventDefault();
     }
@@ -1327,6 +1332,9 @@
   $('btn-clear-all').addEventListener('click', () => act(() => {
     state.points = []; state.round = [0, 0, 0, 0]; state.Hs = {}; state.keys = {}; state.conf = {};
   }));
+  function removeKey(k) {
+    act(() => { const keys = Object.assign({}, state.keys); delete keys[k]; state.keys = keys; });
+  }
   // clé sur l'image courante : la poser (fige la forme affichée) ou la retirer
   $('btn-key').addEventListener('click', () => {
     const k = state.k;
@@ -1352,7 +1360,7 @@
     else if (n < 4) hint = `Cliquez les 4 coins de la surface (${n}/4).`;
     else {
       hint = k !== state.ref && tracked
-        ? (state.keys[k] ? 'Clé : la forme est imposée ici, le suivi est corrigé jusqu\'aux clés voisines. ' : 'Toute retouche ici pose une clé (◆). ')
+        ? (state.keys[k] ? 'Clé : la forme est imposée ici, le suivi est corrigé jusqu\'aux clés voisines (Suppr ou clic droit sur son losange : la retirer). ' : 'Toute retouche ici pose une clé (◆). ')
         : (isDisc() ? 'Disque. ' : '');
       hint += `${tool} : glissez le gizmo (W/E/R ; X : axes ${state.space === 'local' ? 'locaux' : 'du monde'}). ` +
         'Coins et côtés se glissent ; les petits ronds jaunes arrondissent un coin (Maj : les 4, double-clic : aucun).';
@@ -1365,7 +1373,7 @@
     $('btn-clear-track').disabled = !tracked;
     $('btn-key').disabled = !!state.tracking || k === state.ref || !tracked || !effH(k);
     $('btn-key').classList.toggle('keyon', !!state.keys[k] || k === state.ref);
-    $('btn-key').title = k === state.ref ? 'Image de référence (clé d\'origine)' : state.keys[k] ? 'Retirer la clé de cette image'
+    $('btn-key').title = k === state.ref ? 'Image de référence (clé d\'origine)' : state.keys[k] ? 'Retirer la clé de cette image (Suppr)'
       : 'Poser une clé : fige la forme affichée sur cette image';
     $('toolbar').classList.toggle('disabled', !!state.tracking);
 
@@ -1442,7 +1450,18 @@
     return Math.max(0, Math.min(state.n - 1, Math.round(u * (state.n - 1))));
   }
 
+  // clic droit sur un losange de la timeline : supprimer cette clé
+  tl.addEventListener('contextmenu', (ev) => {
+    ev.preventDefault();
+    if (state.tracking || !state.n) return;
+    const k = tlFrame(ev), tol = Math.max(1, Math.round(state.n * 6 / Math.max(1, tl.clientWidth)));
+    const near = Object.keys(state.keys).map(Number).filter((kk) => Math.abs(kk - k) <= tol)
+      .sort((a, b) => Math.abs(a - k) - Math.abs(b - k));
+    if (near.length) removeKey(near[0]);
+  });
+
   tl.addEventListener('mousedown', (ev) => {
+    if (ev.button !== 0) return;
     if (!state.n || state.tracking) return;
     stopPlay();
     state.scrubbing = true;
@@ -1589,7 +1608,10 @@
     if (!r || !r.ae || !inCEP) return;
     $('btn-apply').disabled = true;
     const out = await host('stApplyTracking', state.shot.compId, state.shot.layerIndex,
-      Object.assign({}, r.ae, { mode2d: state.mode2d, refFrame: state.shot.seqStart + state.ref }));
+      Object.assign({}, r.ae, {
+        mode2d: state.mode2d, refFrame: state.shot.seqStart + state.ref,
+        keyFrames: keyFrames().map((k) => state.shot.seqStart + k),
+      }));
     refresh();
     const box = $('apply-msg');
     box.classList.remove('hidden');

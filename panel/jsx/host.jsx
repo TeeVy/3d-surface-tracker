@@ -204,7 +204,8 @@ function stAddTrackerEffect(compId, layerIndex) {
 
 // Écrit le tracking dans l'effet du calque : images clés de la pose (pixels de l'image du
 // calque) ; d : données build_ae_data du moteur, plus mode2d et refFrame (n° d'image de la
-// compo) pour rouvrir le tracker. Les clés précédentes sont remplacées.
+// compo) et keyFrames (images des clés de correction) pour rouvrir le tracker. Les clés
+// précédentes sont remplacées.
 function stApplyTracking(compId, layerIndex, d) {
     var comp = stFindComp(compId);
     var fx = stTrackerFx(comp, layerIndex);
@@ -239,8 +240,19 @@ function stApplyTracking(compId, layerIndex, d) {
     still("Arrondi BG", 100 * r[3]);
     fx.property("Mode").setValue(d.mode2d ? 2 : 1);
     still("Image de référence", d.refFrame);
+    var kp = fx.property("Clés de correction"), kt = [], kv = [];
+    clear(kp);
+    for (i = 0; i < d.keyFrames.length; i++) { kt.push(d.keyFrames[i] * fd); kv.push(1); }
+    kp.setValuesAtTimes(kt, kv);
     app.endUndoGroup();
     return stJSON({ok: true, frames: d.frames.length});
+}
+
+// Images (n° de la compo) des images clés d'une propriété.
+function stKeyFrames(p, fd) {
+    var out = [];
+    for (var i = 1; i <= p.numKeys; i++) out.push(Math.round(p.keyTime(i) / fd));
+    return out;
 }
 
 // Tracking déjà appliqué dans l'effet, pour rouvrir le tracker dessus : pose aux images
@@ -266,7 +278,7 @@ function stReadTracking(compId, layerIndex) {
     return stJSON({ok: true, data: {
         frames: frames, size: [v("Largeur"), v("Hauteur")], dist: v("Distance caméra"),
         disc: fx.property("Forme").value === 2, mode2d: fx.property("Mode").value === 2,
-        ref: Math.round(v("Image de référence")),
+        ref: Math.round(v("Image de référence")), keys: stKeyFrames(fx.property("Clés de correction"), fd),
         round: [v("Arrondi HG"), v("Arrondi HD"), v("Arrondi BD"), v("Arrondi BG")]
     }});
 }
