@@ -9,8 +9,8 @@
       le relit en rouvrant le tracker. Seules la position et l'orientation sont animées (et le
       zoom si l'objectif zoome) ; le reste décrit la surface, la caméra, le mode et l'image de
       référence.
-    - « Créer » : null, solide ou texte posé sur la surface (lié par expressions aux données :
-      il suit un nouveau tracking appliqué), et la caméra si besoin.
+    - « Créer » : caméra et null (copie des images clés de la pose), plus le texte et le solide
+      cochés, parentés au null.
 
     Unités : pixels de l'image du calque (avant sa mise à l'échelle dans la compo).
     Caméra : centrée sur l'image, à la distance « Distance caméra », zoom « Zoom caméra ».
@@ -35,7 +35,7 @@
 #include <vector>
 
 #define MAJOR_VERSION 1
-#define MINOR_VERSION 5
+#define MINOR_VERSION 6
 #define BUG_VERSION 0
 #define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 1
@@ -55,7 +55,7 @@ enum {
     ST_CORR_START, ST_CORR, ST_CORR_END = ST_CORR + 8,
     ST_DATA_END,
     ST_NEW_START,
-    ST_NEW_NULL, ST_NEW_SOLID, ST_NEW_TEXT,
+    ST_NEW_CAM, ST_NEW_NULL, ST_NEW_TEXT, ST_NEW_SOLID, ST_NEW_GO,
     ST_NEW_END,
     ST_NUM_PARAMS
 };
@@ -66,6 +66,7 @@ enum {
     ID_POS_X, ID_POS_Y, ID_POS_Z, ID_ORI_X, ID_ORI_Y, ID_ORI_Z, ID_WIDTH, ID_HEIGHT, ID_ZOOM, ID_DIST,
     ID_SHAPE, ID_R_HG, ID_R_HD, ID_R_BD, ID_R_BG, ID_DATA_END,
     ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END, ID_MODE, ID_REF, ID_KEYS, ID_CORR_START, ID_CORR_END,
+    ID_CHK_CAM = 300, ID_CHK_NULL, ID_CHK_TEXT, ID_CHK_SOLID, ID_NEW_GO,
     ID_CORR = 200
 };
 
@@ -159,12 +160,22 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
 
     AEFX_CLR_STRUCT(def);
     PF_ADD_TOPIC("Créer", ID_NEW_START);
+    // calques à créer : caméra et null toujours (le null porte les images clés), texte et solide au choix
+    struct { const char* name; A_long id; bool on, locked; } boxes[] = {
+        {"Caméra", ID_CHK_CAM, true, true}, {"Calque nul", ID_CHK_NULL, true, true},
+        {"Texte", ID_CHK_TEXT, false, false}, {"Solide", ID_CHK_SOLID, false, false}};
+    for (auto& bx : boxes) {
+        AEFX_CLR_STRUCT(def);
+        def.param_type = PF_Param_CHECKBOX;
+        PF_STRNNCPY(def.PF_DEF_NAME, bx.name, sizeof(def.PF_DEF_NAME));
+        def.u.bd.value = def.u.bd.dephault = bx.on;
+        def.u.bd.u.nameptr = "";
+        def.ui_flags = bx.locked ? PF_PUI_DISABLED : 0;
+        def.uu.id = bx.id;
+        if ((err = PF_ADD_PARAM(in_data, -1, &def))) return err;
+    }
     AEFX_CLR_STRUCT(def);
-    PF_ADD_BUTTON("Null", "Créer le null", 0, PF_ParamFlag_SUPERVISE, ID_NEW_NULL);
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_BUTTON("Solide", "Créer le solide", 0, PF_ParamFlag_SUPERVISE, ID_NEW_SOLID);
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_BUTTON("Texte", "Créer le texte", 0, PF_ParamFlag_SUPERVISE, ID_NEW_TEXT);
+    PF_ADD_BUTTON("", "Créer les calques", 0, PF_ParamFlag_SUPERVISE, ID_NEW_GO);
     AEFX_CLR_STRUCT(def);
     PF_END_TOPIC(ID_NEW_END);
 
@@ -457,8 +468,9 @@ const char* OPEN_SCRIPT = R"JSX(
 })();
 )JSX";
 
-// Crée un calque posé sur la surface : ST_KIND = "null" | "solid" | "text".
-// roundedShape : même fonction que ROUNDED_SHAPE_JS dans surftrack/ae_export.py.
+// Crée la caméra et un null qui reçoit une copie des images clés de la pose, puis le texte et le
+// solide cochés, parentés au null. roundedShape : même fonction que ROUNDED_SHAPE_JS dans
+// surftrack/ae_export.py.
 const char* CREATE_SCRIPT = R"JSX(
 (function () {
     var TITLE = "3D Surface Tracker";
@@ -467,8 +479,8 @@ const char* CREATE_SCRIPT = R"JSX(
     var L = comp.layer(ST_LAYER), fx = null, par = L.property("ADBE Effect Parade");
     for (var i = 1; i <= par.numProperties; i++) if (par.property(i).matchName === "SurfTrack 3D Surface Tracker") { fx = par.property(i); break; }
     if (!fx) return;
-    function v(name) { return fx.property(name).valueAtTime(comp.time, false); }
-    function q(s) { return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'; }
+    function P(name) { return fx.property(name); }
+    function v(name) { return P(name).valueAtTime(comp.time, false); }
     function roundedShape(w, h, r) {
         var K = 0.5523, vs = [], it = [], ot = [], any = false;
         var C = [[0, 0, [0, 1], [1, 0]], [w, 0, [-1, 0], [0, 1]], [w, h, [0, -1], [-1, 0]], [0, h, [1, 0], [0, -1]]];
@@ -490,69 +502,89 @@ const char* CREATE_SCRIPT = R"JSX(
         alert(TITLE + "\n\nAucun tracking appliqué : ouvrez le tracker, trackez, puis « Appliquer le tracking ».");
         return;
     }
-    var k = comp.width / L.width;
+    var k = comp.width / L.width;   // pixels de l'image du calque -> pixels de la compo
     var base = "ST " + L.name;
-    // références aux données de l'effet (AE met à jour les noms dans les expressions s'ils changent)
-    var ref = "var L = thisComp.layer(" + q(L.name) + "), e = L.effect(" + q(fx.name) + ");\n" +
-              "var k = thisComp.width / L.width;\n";
-    app.beginUndoGroup("3D Surface Tracker : créer un calque");
-
-    // caméra (une par calque tracké), fixe ; zoom lié aux données
-    var cam = null;
-    for (var c = 1; c <= comp.numLayers; c++) if (comp.layer(c) instanceof CameraLayer && comp.layer(c).name === base + " Caméra") cam = comp.layer(c);
-    if (!cam) {
-        cam = comp.layers.addCamera(base + " Caméra", [comp.width / 2, comp.height / 2]);
-        cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
-        var ct = cam.property("ADBE Transform Group");
-        ct.property("ADBE Position").expression = ref + "[thisComp.width / 2, thisComp.height / 2, -e(\"Distance caméra\") * k]";
-        ct.property("ADBE Orientation").setValue([0, 0, 0]);
-        cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom").expression = ref + "e(\"Zoom caméra\") * k";
+    // instants des images clés de la pose (une seule valeur si rien n'est animé)
+    var px = P("Position X"), times = [];
+    for (i = 1; i <= px.numKeys; i++) times.push(px.keyTime(i));
+    function copy(prop, f, src) {  // f(t) : valeur à l'instant t
+        if (src.numKeys === 0) { prop.setValue(f(comp.time)); return; }
+        var ts = [], vs = [];
+        for (var j = 1; j <= src.numKeys; j++) { ts.push(src.keyTime(j)); vs.push(f(src.keyTime(j))); }
+        prop.setValuesAtTimes(ts, vs);
     }
+    function at(name, t) { return P(name).valueAtTime(t, false); }
+    app.beginUndoGroup("3D Surface Tracker : créer les calques");
 
+    // caméra fixe, centrée ; son zoom suit celui de l'objectif
+    var cam = comp.layers.addCamera(base + " Caméra", [comp.width / 2, comp.height / 2]);
+    cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
+    cam.property("ADBE Transform Group").property("ADBE Position").setValue([comp.width / 2, comp.height / 2, -v("Distance caméra") * k]);
+    cam.property("ADBE Transform Group").property("ADBE Orientation").setValue([0, 0, 0]);
+    copy(cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom"),
+         function (t) { return at("Zoom caméra", t) * k; }, P("Zoom caméra"));
+
+    // null au centre de la surface : copie des images clés de position et d'orientation
+    var nul = comp.layers.addNull();
+    nul.name = base + " Surface";
+    nul.threeDLayer = true;
+    var NT = nul.property("ADBE Transform Group");
+    NT.property("ADBE Anchor Point").setValue([0, 0, 0]);
+    copy(NT.property("ADBE Position"), function (t) {
+        return [at("Position X", t) * k, at("Position Y", t) * k, at("Position Z", t) * k];
+    }, px);
+    copy(NT.property("ADBE Orientation"), function (t) {
+        return [at("Orientation X", t), at("Orientation Y", t), at("Orientation Z", t)];
+    }, px);
+
+    // texte et solide, enfants du null, au centre de la surface
     var w = Math.max(4, Math.round(v("Largeur") * k)), h = Math.max(4, Math.round(v("Hauteur") * k));
-    var lay;
-    if (ST_KIND === "null") {
-        lay = comp.layers.addNull();
-        lay.name = base + " Surface";
-        lay.property("ADBE Transform Group").property("ADBE Anchor Point").setValue([0, 0, 0]);
-    } else if (ST_KIND === "solid") {
-        lay = comp.layers.addSolid([0.15, 0.55, 1.0], base + " Solide", w, h, comp.pixelAspect);
-        lay.property("ADBE Transform Group").property("ADBE Opacity").setValue(60);
-        var r = fx.property("Forme").value === 2 ? [1, 1, 1, 1]
+    function child(lay) {
+        lay.threeDLayer = true;
+        lay.parent = nul;
+        var T = lay.property("ADBE Transform Group");
+        T.property("ADBE Position").setValue([0, 0, 0]);
+        T.property("ADBE Orientation").setValue([0, 0, 0]);
+        T.property("ADBE Rotate X").setValue(0);
+        T.property("ADBE Rotate Y").setValue(0);
+        T.property("ADBE Rotate Z").setValue(0);
+        return lay;
+    }
+    if (P("Solide").value) {
+        var sol = comp.layers.addSolid([0.15, 0.55, 1.0], base + " Solide", w, h, comp.pixelAspect);
+        sol.property("ADBE Transform Group").property("ADBE Opacity").setValue(60);
+        var r = P("Forme").value === 2 ? [1, 1, 1, 1]
             : [v("Arrondi HG") / 100, v("Arrondi HD") / 100, v("Arrondi BD") / 100, v("Arrondi BG") / 100];
         var sh = roundedShape(w, h, r);
-        if (sh) lay.property("ADBE Mask Parade").addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(sh);
-    } else {
-        lay = comp.layers.addText("Texte");
-        lay.name = base + " Texte";
-        var tp = lay.property("ADBE Text Properties").property("ADBE Text Document"), td = tp.value;
+        if (sh) sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(sh);
+        child(sol);
+        sol.property("ADBE Transform Group").property("ADBE Scale").setValue([100 * v("Largeur") * k / w, 100 * v("Hauteur") * k / h, 100]);
+    }
+    if (P("Texte").value) {
+        var txt = comp.layers.addText("Texte");
+        txt.name = base + " Texte";
+        var tp = txt.property("ADBE Text Properties").property("ADBE Text Document"), td = tp.value;
         td.fontSize = Math.max(6, Math.round(0.22 * Math.min(w, h)));
         td.fillColor = [1, 1, 1];
         td.justification = ParagraphJustification.CENTER_JUSTIFY;
         tp.setValue(td);
-        var b = lay.sourceRectAtTime(comp.time, false);
-        lay.property("ADBE Transform Group").property("ADBE Anchor Point").setValue([b.left + b.width / 2, b.top + b.height / 2, 0]);
+        var b = txt.sourceRectAtTime(comp.time, false);
+        txt.property("ADBE Transform Group").property("ADBE Anchor Point").setValue([b.left + b.width / 2, b.top + b.height / 2, 0]);
+        child(txt);
     }
-    lay.threeDLayer = true;
-    var T = lay.property("ADBE Transform Group");
-    T.property("ADBE Position").expression = ref + "[e(\"Position X\"), e(\"Position Y\"), e(\"Position Z\")] * k";
-    T.property("ADBE Orientation").expression = ref + "[e(\"Orientation X\"), e(\"Orientation Y\"), e(\"Orientation Z\")]";
-    if (ST_KIND === "solid") T.property("ADBE Scale").setValue([100 * v("Largeur") * k / w, 100 * v("Hauteur") * k / h, 100]);
-    lay.moveBefore(L);
     app.endUndoGroup();
 })();
 )JSX";
 
+// Les scripts sont différés (app.scheduleTask) : modifier le projet pendant qu'AE traite le clic
+// sur un paramètre de l'effet provoque l'erreur « topic has no owning outline ».
 PF_Err OnButton(PF_InData* in_data, int index)
 {
     std::string head;
     if (!ScriptHead(in_data, head)) return PF_Err_NONE;
-    if (index == ST_OPEN) {
-        RunScript(in_data, head + OPEN_SCRIPT);
-    } else {
-        const char* kind = index == ST_NEW_NULL ? "null" : index == ST_NEW_SOLID ? "solid" : "text";
-        RunScript(in_data, head + "var ST_KIND = \"" + kind + "\";\n" + CREATE_SCRIPT);
-    }
+    const char* body = index == ST_OPEN ? OPEN_SCRIPT : CREATE_SCRIPT;
+    RunScript(in_data, "$.global.ST_TASK = function () {\n" + head + body + "\n};\n"
+                       "app.scheduleTask(\"$.global.ST_TASK()\", 50, false);");
     return PF_Err_NONE;
 }
 
@@ -591,8 +623,7 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data, PF_OutData* out_data, PF_Param
                 break;
             case PF_Cmd_USER_CHANGED_PARAM: {
                 const PF_UserChangedParamExtra* ch = reinterpret_cast<const PF_UserChangedParamExtra*>(extra);
-                if (ch && (ch->param_index == ST_OPEN || ch->param_index == ST_NEW_NULL ||
-                           ch->param_index == ST_NEW_SOLID || ch->param_index == ST_NEW_TEXT)) {
+                if (ch && (ch->param_index == ST_OPEN || ch->param_index == ST_NEW_GO)) {
                     err = OnButton(in_data, ch->param_index);
                 }
                 break;
