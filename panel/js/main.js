@@ -327,10 +327,22 @@
       if (!(await bridgeAvailable())) {
         throw new Error('Pont After Effects absent : installez les plug-ins (native/build.sh --install) puis redémarrez After Effects.');
       }
+      // tracking déjà appliqué : ses images sont chargées en premier (référence, puis la plage trackée)
+      const rt = await host('stReadTracking', sel.compId, sel.layerIndex);
+      const saved = rt.ok ? rt.data : null;
+      let first = sel.cur, priority = null;
+      if (saved && saved.frames.length) {
+        const ks = saved.frames.map((row) => row[0] - sel.seqStart).filter((k) => k >= 0 && k < state.n);
+        if (ks.length) {
+          priority = [Math.min(...ks), Math.max(...ks)];
+          first = ks.indexOf(saved.ref - sel.seqStart) >= 0 ? saved.ref - sel.seqStart : ks[0];
+          state.k = state.ref = first;
+        }
+      }
       fs.mkdirSync(state.workDir, { recursive: true });
       const seq = path.join(state.workDir, 'seq.json');
       fs.writeFileSync(seq, JSON.stringify({
-        times: sel.times, fps: sel.compFps, start: sel.seqStart, first: sel.cur, width: sel.width, height: sel.height,
+        times: sel.times, fps: sel.compFps, start: sel.seqStart, first, priority, width: sel.width, height: sel.height,
         layer: { comp: sel.compId, layer: sel.layerIndex, effect: sel.effectIndex },
         lens_src: sel.lensFile || null, lens_frames: sel.lensFrames || null, focal_scale: sel.focalScale || 1,
       }));
@@ -343,7 +355,7 @@
       state.lensMm = info.lens ? info.lens.focal35_mm : null;
       $('focal-wrap').classList.toggle('hidden', !!state.lensMm);
       enable('s-surface', true);
-      await restoreFromEffect();
+      if (saved) restoreFromEffect(saved);
       await loadFull(state.k);
       fitView();
     } catch (e) {
@@ -356,10 +368,8 @@
   // ------------------------------------------------------------------ tracking déjà appliqué
   /** Rouvre le tracking enregistré dans l'effet : la pose de chaque image clé redonne les coins
    *  de la surface, donc son suivi (homographie depuis l'image de référence). */
-  async function restoreFromEffect() {
-    const r = await host('stReadTracking', state.shot.compId, state.shot.layerIndex);
-    if (!r.ok || !r.data) return;
-    const d = r.data, off = state.shot.seqStart, W = state.W, H = state.H, [w, h] = d.size;
+  function restoreFromEffect(d) {
+    const off = state.shot.seqStart, W = state.W, H = state.H, [w, h] = d.size;
     const corners = ([, px, py, pz, ox, oy, oz, zoom]) => {
       const R = eulerXYZ(ox, oy, oz), t = [px - W / 2, py - H / 2, pz + d.dist];
       return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => {

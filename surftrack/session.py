@@ -81,6 +81,8 @@ class Session:
         self.comp_fps = float(seq["fps"])
         self.seq_start = int(seq["start"])                # n° d'image compo de l'image 0
         self.first = int(seq.get("first") or 0)           # image à charger en premier (la référence)
+        # plage déjà trackée (tracking repris de l'effet) : chargée juste après la référence
+        self.priority = seq.get("priority") or [self.first, self.first]
         self.W, self.H = int(seq["width"]), int(seq["height"])
         # focale : lue dans le rush du calque (ou le plus bas du précomp), image par image
         self.lens_video = seq.get("lens_src")
@@ -106,7 +108,11 @@ class Session:
     def load_all(self):
         """Une passe : images de tracking en mémoire + vignettes sur disque, la référence d'abord."""
         first = min(max(self.first, 0), self.n - 1)
-        order = list(range(first, self.n)) + list(range(first - 1, -1, -1))
+        a, b = sorted(min(max(int(v), 0), self.n - 1) for v in self.priority)
+        a, b = min(a, first), max(b, first)
+        # référence, puis le reste de la plage trackée (avant, arrière), puis le reste du plan
+        order = (list(range(first, b + 1)) + list(range(first - 1, a - 1, -1))
+                 + list(range(b + 1, self.n)) + list(range(a - 1, -1, -1)))
         ds = int(round(1 / self.scale))
         tw, th_ = int(round(self.W * self.scale)), int(round(self.H * self.scale))
         done, last, got = 0, 0.0, []
