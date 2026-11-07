@@ -15,6 +15,7 @@
 }
 
 * { box-sizing: border-box; }
+#keysink { position: fixed; left: -200px; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
 html, body { margin: 0; background: var(--bg); color: var(--text);
   font: 13px/1.4 -apple-system, "Segoe UI", sans-serif; }
 body { padding: 8px 10px 14px; overflow-y: auto; }

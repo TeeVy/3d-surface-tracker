@@ -1306,7 +1306,7 @@
     const mod = ev.metaKey || ev.ctrlKey;
     if (mod && (ev.key === 'z' || ev.key === 'Z')) { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
     if (mod && (ev.key === 'y' || ev.key === 'Y')) { ev.preventDefault(); redo(); return; }
-    if (ev.target.tagName === 'INPUT' && ev.target.type !== 'checkbox') return;
+    if (ev.target.tagName === 'INPUT' && ev.target !== keysink && ev.target.type !== 'checkbox') return;
     if (ev.code === 'Space') { state.spaceKey = true; canvas.classList.add('pan'); ev.preventDefault(); }
     const k = ev.key.toLowerCase();
     if (!mod && (k === 'w' || k === 'e' || k === 'r')) { setXform({ w: 'move', e: 'rotate', r: 'scale' }[k]); ev.preventDefault(); }
@@ -1324,6 +1324,18 @@
       ev.preventDefault();
     }
   });
+  // Le panneau garde le clavier : après chaque clic (hors champ de saisie), le focus revient au champ
+  // invisible ; sinon After Effects reçoit les touches (⌘Z, W, E, R…) à la place du panneau.
+  const keysink = $('keysink');
+  const grabKeys = () => { if (document.activeElement !== keysink) keysink.focus({ preventScroll: true }); keysink.value = ''; };
+  document.addEventListener('mousedown', (ev) => {
+    const t = ev.target;
+    if (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'range') return;  // focale saisie
+    setTimeout(grabKeys, 0);
+  }, true);
+  window.addEventListener('focus', () => { if (!document.activeElement || document.activeElement === document.body) grabKeys(); });
+  keysink.addEventListener('input', () => { keysink.value = ''; });
+
   window.addEventListener('keyup', (ev) => {
     if (ev.code === 'Space') { state.spaceKey = false; if (!state.drag) canvas.classList.remove('pan'); }
   });
