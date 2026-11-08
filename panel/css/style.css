@@ -78,8 +78,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; height:
 /* transport + timeline */
 .transport { margin-top: 8px; flex-wrap: wrap; row-gap: 6px; }
 .transport { column-gap: 6px; }
-.transport .tool.icon { width: 30px; }
-.transport .tool svg { width: 18px; height: 18px; }
+.transport .tool.icon { width: 36px; }
 .toolbar { column-gap: 6px; }
 .toolbar .tool.icon { width: 36px; }
 .toolbar .tool.txt { width: 34px; }
