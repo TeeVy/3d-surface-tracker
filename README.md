@@ -148,7 +148,11 @@ Les images de chaque session (vignettes, images en pleine résolution) sont dans
    est ignoré. Chaque image passe par trois étapes :
    - suivi de points (KLT) ;
    - alignement dense de toute la zone sur l'image précédente (ECC), efficace même sur les surfaces peu texturées ;
-   - recalage sur l'image de référence quand c'est possible, pour supprimer la dérive.
+   - recalage sur une ancre, pour supprimer la dérive : l'image de référence, ou la clé de correction
+     la plus proche dans le temps (une ressemblance quasi parfaite rattrape même une forte dérive) ;
+   - occultations : après un premier alignement, les pixels qui ne correspondent plus (main, objet
+     qui passe devant, s'ils couvrent plus de 8 % de la zone) sont exclus et l'alignement est refait ;
+     quand les points suivis et la vitesse constante divergent, on aligne depuis les deux.
 2. **Disques** (`surftrack/ellipse_track.py`) : le bord est « aimanté » sur le contour net, puis suivi
    image par image par corrélation de profils perpendiculaires au bord. Cette méthode résiste aux
    reflets mobiles et aux mains devant le bord.

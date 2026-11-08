@@ -178,8 +178,13 @@ class Session:
         k, d, count = int(c["k"]), int(c["dir"]), int(c.get("count") or 0)
         ref = int(c["ref"])
         poly = make_surface(c).track_polygon() * self.scale
-        tracker = PlanarTracker()
-        tracker.prepare(self.frame(ref), poly)
+        # disque : uniforme, il se suit par son bord (déjà robuste aux occultations) ; masquer ses
+        # reflets ôterait le peu de texture qui fixe sa rotation
+        tracker = PlanarTracker(robust=not bool(np.all(_radii(c) >= 0.999)))
+        tracker.prepare(self.frame(ref), poly, ref)
+        # clés de correction : formes sûres, qui servent aussi de modèles de recalage (anti-dérive)
+        for key, Hk in (c.get("anchors") or {}).items():
+            tracker.add_anchor(int(key), self.frame(int(key)), self.S @ _mat(Hk) @ self.Si, poly)
         H_prev = self.S @ _mat(c["H"]) @ self.Si
         dH = (H_prev @ np.linalg.inv(self.S @ _mat(c["Hprev"]) @ self.Si)) if c.get("Hprev") else np.eye(3)
         prev, i, done = k, k + d, 0
@@ -193,7 +198,7 @@ class Session:
             if self.stop.is_set():
                 reason = "stop"
                 break
-            H, conf, _ = tracker.step(self.frame(prev), self.frame(i), H_prev, dH, poly)
+            H, conf, _ = tracker.step(self.frame(prev), self.frame(i), H_prev, dH, poly, i)
             area = _area(warp_points(H, poly)) if np.all(np.isfinite(H)) else np.nan
             ratio = area / area_prev if area_prev > 0 else np.nan
             if not np.isfinite(ratio) or conf < 0.3 or not 1 / 1.5 < ratio < 1.5:

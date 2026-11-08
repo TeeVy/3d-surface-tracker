@@ -1607,6 +1607,7 @@
         const r = await state.eng.send({
           cmd: 'track', k: k0, dir: d, count, ref: state.ref, H: H0, Hprev: effH(k0 - d) || null,
           points: pts, roundness: radii(),
+          anchors: state.keys,  // les clés servent aussi de modèles de recalage (anti-dérive)
         });
         if (r.reason === 'lost') {
           toast(`Suivi perdu à l'image ${state.shot.seqStart + r.last + d} : corrigez la forme (clé) ou reprenez depuis une autre image.`, 5000);

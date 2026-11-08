@@ -66,7 +66,7 @@ def run(video, surface, ref_frame=0, focal_px=None, focal_mm=None, sensor_mm=36.
         if live:
             live(i + start, clip.frames[i], Hs, poly)
 
-    tracker = PlanarTracker()
+    tracker = PlanarTracker(robust=surface.kind != "disc")  # disque : voir session.py
     track_small = tracker.track(clip.frames, ref_frame, poly, on_step, should_stop)
     track = track_small.scaled(1 / track_scale)
     if tracker.stopped:
