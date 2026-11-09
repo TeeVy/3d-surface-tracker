@@ -84,9 +84,9 @@ Dans le Terminal, depuis ce dossier :
 fenêtre de composition quand l'effet est sélectionné), *Données du tracking* (seules la position et
 l'orientation sont animées, et le zoom si l'objectif zoome ; le reste décrit la surface, la caméra,
 le mode 2D/3D et l'image de référence),
-*Créer* : cochez Texte et/ou Solide (Caméra et Calque nul le sont toujours), puis **Créer les
-calques**. Le null reçoit une copie des images clés de la pose ; le texte et le solide lui sont
-parentés. Après un nouveau tracking appliqué, recréez les calques.
+*Créer* : cochez Texte, Solide et/ou Calque de forme (Caméra et Calque nul le sont toujours), puis
+**Créer les calques**. Le null reçoit une copie des images clés de la pose ; les autres calques lui sont
+parentés. Le calque de forme trace le contour de la surface (coins arrondis, disque). Après un nouveau tracking appliqué, recréez les calques.
 
 **Annuler** : ⌘Z annule n'importe quelle action du panneau, ⇧⌘Z la rétablit. La corbeille propose
 d'effacer le suivi seul (la forme reste) ou tout.

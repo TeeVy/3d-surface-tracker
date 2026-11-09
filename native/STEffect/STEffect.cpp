@@ -9,8 +9,8 @@
       le relit en rouvrant le tracker. Seules la position et l'orientation sont animées (et le
       zoom si l'objectif zoome) ; le reste décrit la surface, la caméra, le mode et l'image de
       référence.
-    - « Créer » : caméra et null (copie des images clés de la pose), plus le texte et le solide
-      cochés, parentés au null.
+    - « Créer » : caméra et null (copie des images clés de la pose), plus le texte, le solide et
+      le calque de forme (contour de la surface) cochés, parentés au null.
 
     Unités : pixels de l'image du calque (avant sa mise à l'échelle dans la compo).
     Caméra : centrée sur l'image, à la distance « Distance caméra », zoom « Zoom caméra ».
@@ -35,7 +35,7 @@
 #include <vector>
 
 #define MAJOR_VERSION 1
-#define MINOR_VERSION 7
+#define MINOR_VERSION 8
 #define BUG_VERSION 0
 #define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 1
@@ -55,7 +55,7 @@ enum {
     ST_CORR_START, ST_CORR, ST_CORR_END = ST_CORR + 8,
     ST_DATA_END,
     ST_NEW_START,
-    ST_NEW_CAM, ST_NEW_NULL, ST_NEW_TEXT, ST_NEW_SOLID, ST_NEW_GO,
+    ST_NEW_CAM, ST_NEW_NULL, ST_NEW_TEXT, ST_NEW_SOLID, ST_NEW_SHAPE, ST_NEW_GO,
     ST_NEW_END,
     ST_NUM_PARAMS
 };
@@ -66,7 +66,7 @@ enum {
     ID_POS_X, ID_POS_Y, ID_POS_Z, ID_ORI_X, ID_ORI_Y, ID_ORI_Z, ID_WIDTH, ID_HEIGHT, ID_ZOOM, ID_DIST,
     ID_SHAPE, ID_R_HG, ID_R_HD, ID_R_BD, ID_R_BG, ID_DATA_END,
     ID_NEW_START, ID_NEW_NULL, ID_NEW_SOLID, ID_NEW_TEXT, ID_NEW_END, ID_MODE, ID_REF, ID_KEYS, ID_CORR_START, ID_CORR_END,
-    ID_CHK_CAM = 300, ID_CHK_NULL, ID_CHK_TEXT, ID_CHK_SOLID, ID_NEW_GO,
+    ID_CHK_CAM = 300, ID_CHK_NULL, ID_CHK_TEXT, ID_CHK_SOLID, ID_NEW_GO, ID_CHK_SHAPE,
     ID_CORR = 200
 };
 
@@ -161,7 +161,8 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
     // calques à créer : caméra et null toujours (le null porte les images clés), texte et solide au choix
     struct { const char* name; A_long id; bool on, locked; } boxes[] = {
         {"Caméra", ID_CHK_CAM, true, true}, {"Calque nul", ID_CHK_NULL, true, true},
-        {"Texte", ID_CHK_TEXT, false, false}, {"Solide", ID_CHK_SOLID, false, false}};
+        {"Texte", ID_CHK_TEXT, false, false}, {"Solide", ID_CHK_SOLID, false, false},
+        {"Calque de forme", ID_CHK_SHAPE, false, false}};
     for (auto& bx : boxes) {
         AEFX_CLR_STRUCT(def);
         def.param_type = PF_Param_CHECKBOX;
@@ -557,6 +558,32 @@ const char* CREATE_SCRIPT = R"JSX(
         if (sh) sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(sh);
         child(sol);
         sol.property("ADBE Transform Group").property("ADBE Scale").setValue([100 * v("Largeur") * k / w, 100 * v("Hauteur") * k / h, 100]);
+    }
+    if (P("Calque de forme").value) {  // tracé du contour de la surface, centré sur le null
+        var shl = comp.layers.addShape();
+        shl.name = base + " Forme";
+        var rr = P("Forme").value === 2 ? [1, 1, 1, 1]
+            : [v("Arrondi HG") / 100, v("Arrondi HD") / 100, v("Arrondi BD") / 100, v("Arrondi BG") / 100];
+        var path = roundedShape(w, h, rr);
+        if (!path) {
+            path = new Shape();
+            path.vertices = [[0, 0], [w, 0], [w, h], [0, h]];
+            path.closed = true;
+        }
+        var vs = path.vertices;
+        for (var q = 0; q < vs.length; q++) vs[q] = [vs[q][0] - w / 2, vs[q][1] - h / 2];
+        path.vertices = vs;
+        var grp = shl.property("ADBE Root Vectors Group").addProperty("ADBE Vector Group");
+        grp.name = "Surface";
+        var gc = grp.property("ADBE Vectors Group");
+        gc.addProperty("ADBE Vector Shape - Group").property("ADBE Vector Shape").setValue(path);
+        var st = gc.addProperty("ADBE Vector Graphic - Stroke");
+        st.property("ADBE Vector Stroke Color").setValue([0, 0.86, 1]);
+        st.property("ADBE Vector Stroke Width").setValue(Math.max(2, Math.round(0.01 * Math.min(w, h))));
+        var fl = gc.addProperty("ADBE Vector Graphic - Fill");
+        fl.property("ADBE Vector Fill Color").setValue([0, 0.86, 1]);
+        fl.property("ADBE Vector Fill Opacity").setValue(25);
+        child(shl);
     }
     if (P("Texte").value) {
         var txt = comp.layers.addText("Texte");
