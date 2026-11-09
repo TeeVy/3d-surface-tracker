@@ -39,7 +39,7 @@ Dans le Terminal, depuis ce dossier :
 
 ### Utilisation
 
-1. Appliquez l'effet *Effet > 3D Surface Tracker > 3D Surface Tracker* **tout en bas de la pile
+1. Appliquez l'effet *Effet > TeeVy > 3D Surface Tracker* **tout en bas de la pile
    d'effets** du calque à tracker, puis cliquez **Ouvrir le tracker**. Le panneau suit l'image du
    calque **telle qu'elle arrive à l'effet** : une Stabilisation de déformation ou tout autre effet
    placé au-dessus est pris en compte, sans précomposer. Remappages et étirements du calque aussi.

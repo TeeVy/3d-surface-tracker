@@ -6,7 +6,7 @@ resource 'PiPL' (16000) {
 	{
 		Kind { AEEffect },
 		Name { "3D Surface Tracker" },
-		Category { "3D Surface Tracker" },
+		Category { "TeeVy" },
 		CodeMacIntel64 { "EffectMain" },
 		CodeMacARM64 { "EffectMain" },
 		AE_PiPL_Version { 2, 0 },

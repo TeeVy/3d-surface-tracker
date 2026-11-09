@@ -621,7 +621,7 @@ extern "C" DllExport PF_Err PluginDataEntryFunction2(PF_PluginDataPtr inPtr, PF_
 {
     PF_Err result = PF_Err_INVALID_CALLBACK;
     result = PF_REGISTER_EFFECT_EXT2(inPtr, inPluginDataCallBackPtr, "3D Surface Tracker", "SurfTrack 3D Surface Tracker",
-                                     "3D Surface Tracker", AE_RESERVED_INFO, "EffectMain", "https://github.com");
+                                     "TeeVy", AE_RESERVED_INFO, "EffectMain", "https://github.com");
     return result;
 }
 
