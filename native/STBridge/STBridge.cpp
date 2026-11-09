@@ -72,6 +72,7 @@ std::mutex S_qm;
 std::deque<std::shared_ptr<Request>> S_queue;
 std::atomic<bool> S_quit{false};
 int S_listen = -1;
+ino_t S_sock_ino = 0;  // fichier de socket créé par cette instance d'AE
 std::string S_sock_path;
 
 // ------------------------------------------------------------------ rendu (fil principal)
@@ -158,8 +159,11 @@ void RenderLayer(AEGP_SuiteHandler& suites, Request& r)
     ERR2(suites.EffectSuite4()->AEGP_DisposeEffect(effectH));
 }
 
+void EnsureSocket();
+
 A_Err IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long* max_sleepPL)
 {
+    EnsureSocket();
     AEGP_SuiteHandler suites(S_sp);
     const auto start = std::chrono::steady_clock::now();
     for (;;) {
@@ -259,12 +263,12 @@ void Serve(int fd)
     close(fd);
 }
 
-void Listen()
+void Listen(int lfd)
 {
     while (!S_quit) {
-        int fd = accept(S_listen, nullptr, nullptr);
+        int fd = accept(lfd, nullptr, nullptr);
         if (fd < 0) {
-            if (S_quit) break;
+            if (S_quit || lfd != S_listen) break;  // socket remplacée : ce fil s'arrête
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
@@ -272,6 +276,41 @@ void Listen()
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));  // client parti : pas de SIGPIPE
         std::thread(Serve, fd).detach();
     }
+}
+
+bool Bind()
+{
+    unlink(S_sock_path.c_str());
+    int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (lfd < 0) return false;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    if (S_sock_path.size() >= sizeof(addr.sun_path)) { close(lfd); return false; }
+    std::strncpy(addr.sun_path, S_sock_path.c_str(), sizeof(addr.sun_path) - 1);
+    if (bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0 || listen(lfd, 8) < 0) {
+        close(lfd);
+        return false;
+    }
+    chmod(S_sock_path.c_str(), 0600);  // seul l'utilisateur peut s'y connecter
+    struct stat st;
+    S_sock_ino = stat(S_sock_path.c_str(), &st) == 0 ? st.st_ino : 0;
+    int old = S_listen;
+    S_listen = lfd;
+    if (old >= 0) { shutdown(old, SHUT_RDWR); close(old); }
+    std::thread(Listen, lfd).detach();
+    return true;
+}
+
+// Le fichier de socket a disparu (une autre instance d'AE qui se fermait l'a effacé, par
+// exemple) : on le recrée. Vérifié dans le crochet idle, toutes les 2 s au plus.
+void EnsureSocket()
+{
+    static auto last = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (S_quit || S_sock_path.empty() || now - last < std::chrono::seconds(2)) return;
+    last = now;
+    struct stat st;
+    if (stat(S_sock_path.c_str(), &st) != 0) Bind();
 }
 
 bool StartServer()
@@ -284,18 +323,7 @@ bool StartServer()
     std::string dir = std::string(home) + "/Library/Application Support/3D Surface Tracker";
     mkdir(dir.c_str(), 0755);
     S_sock_path = dir + "/bridge.sock";
-    unlink(S_sock_path.c_str());
-    S_listen = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (S_listen < 0) return false;
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    if (S_sock_path.size() >= sizeof(addr.sun_path)) return false;
-    std::strncpy(addr.sun_path, S_sock_path.c_str(), sizeof(addr.sun_path) - 1);
-    if (bind(S_listen, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) return false;
-    chmod(S_sock_path.c_str(), 0600);  // seul l'utilisateur peut s'y connecter
-    if (listen(S_listen, 8) < 0) return false;
-    std::thread(Listen).detach();
-    return true;
+    return Bind();
 }
 
 A_Err DeathHook(AEGP_GlobalRefcon, AEGP_DeathRefcon)
@@ -306,7 +334,12 @@ A_Err DeathHook(AEGP_GlobalRefcon, AEGP_DeathRefcon)
         close(S_listen);
         S_listen = -1;
     }
-    if (!S_sock_path.empty()) unlink(S_sock_path.c_str());
+    // n'effacer le fichier de socket que s'il est le nôtre : une nouvelle instance d'AE a pu
+    // déjà créer le sien
+    struct stat st;
+    if (!S_sock_path.empty() && stat(S_sock_path.c_str(), &st) == 0 && st.st_ino == S_sock_ino) {
+        unlink(S_sock_path.c_str());
+    }
     // requêtes en attente : on les libère avec une erreur
     std::lock_guard<std::mutex> lk(S_qm);
     for (auto& r : S_queue) {
