@@ -126,7 +126,9 @@
   // ------------------------------------------------------------------ After Effects
   function host(fn, ...args) {
     if (!inCEP) return Promise.resolve({ ok: false, msg: 'Hors d\'After Effects.' });
-    const call = `${fn}(${args.map((a) => JSON.stringify(a)).join(',')})`;
+    // l'exception ExtendScript est renvoyée telle quelle (sinon CEP ne dit que « EvalScript error. »)
+    const call = `try{${fn}(${args.map((a) => JSON.stringify(a)).join(',')})}catch(e){` +
+      `stFail(e.toString()+" (${fn}, ligne "+e.line+")")}`;
     return new Promise((resolve) => {
       window.__adobe_cep__.evalScript(call, (r) => {
         try { resolve(JSON.parse(r)); } catch (e) { resolve({ ok: false, msg: "Réponse inattendue d'After Effects : " + r }); }

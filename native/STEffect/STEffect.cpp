@@ -35,7 +35,7 @@
 #include <vector>
 
 #define MAJOR_VERSION 1
-#define MINOR_VERSION 8
+#define MINOR_VERSION 9
 #define BUG_VERSION 0
 #define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 1
@@ -86,7 +86,7 @@ PF_Err GlobalSetup(PF_InData* in_data, PF_OutData* out_data)
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION);
     // doivent correspondre aux drapeaux du PiPL (STEffect_PiPL.r)
     out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_CUSTOM_UI;
-    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING | PF_OutFlag2_STRINGS_ARE_UTF8;
     AEGP_SuiteHandler suites(in_data->pica_basicP);
     // identifiant AEGP : nécessaire pour exécuter un script depuis l'effet
     suites.UtilitySuite3()->AEGP_RegisterWithAEGP(nullptr, "3D Surface Tracker", &S_aegp_id);

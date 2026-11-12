@@ -11,10 +11,10 @@ resource 'PiPL' (16000) {
 		CodeMacARM64 { "EffectMain" },
 		AE_PiPL_Version { 2, 0 },
 		AE_Effect_Spec_Version { PF_PLUG_IN_VERSION, PF_PLUG_IN_SUBVERS },
-		AE_Effect_Version { 786433 },	/* 1.8 */
+		AE_Effect_Version { 819201 },	/* 1.9 */
 		AE_Effect_Info_Flags { 0 },
 		AE_Effect_Global_OutFlags { 0x02008000 },	/* DEEP_COLOR_AWARE | CUSTOM_UI */
-		AE_Effect_Global_OutFlags_2 { 0x08000000 },	/* SUPPORTS_THREADED_RENDERING */
+		AE_Effect_Global_OutFlags_2 { 0x48000000 },	/* SUPPORTS_THREADED_RENDERING | STRINGS_ARE_UTF8 (noms accentués) */
 		AE_Effect_Match_Name { "SurfTrack 3D Surface Tracker" },
 		AE_Reserved_Info { 0 },
 		AE_Effect_Support_URL { "https://github.com" }
