@@ -81,9 +81,10 @@
   };
 
   // ------------------------------------------------------------------ utilitaires
-  function toast(msg, ms) {
+  function toast(msg, ms, kind) {
     const t = $('toast');
     t.textContent = msg;
+    t.classList.toggle('ok', kind === 'ok');
     t.classList.remove('hidden');
     clearTimeout(toast._t);
     toast._t = setTimeout(() => t.classList.add('hidden'), ms || 7000);
@@ -285,8 +286,10 @@
     enable('s-surface', true);
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
-    $('shot-info').innerHTML = `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · « ${escapeHtml(sel.compName)} »</div>`;
+    $('shot-info').innerHTML = `<div class="line"><b>${escapeHtml(sel.layerName)}</b></div>`;
+    $('details-shot').textContent = `Compo « ${sel.compName} ».`;
     $('shot-warnings').innerHTML = '';
+    $('btn-details').classList.remove('warn');
     $('need-text').textContent = "Ce calque n'a pas l'effet « 3D Surface Tracker ». C'est lui qui porte le tracking dans le projet : " +
       "ajoutez-le tout en bas de la pile d'effets, il verra l'image avec les effets placés au-dessus (stabilisation…)." +
       (sel.hasEffects ? '\n\nCe calque a déjà des effets : l\'effet tracker sera ajouté sous eux.' : '');
@@ -315,13 +318,15 @@
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
     $('shot-info').innerHTML =
-      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> · « ${escapeHtml(sel.compName)} »</div>` +
-      `<div class="line dim">Images ${sel.seqStart}–${sel.seqStart + state.n - 1} (${state.n}), telles qu'elles arrivent à l'effet</div>`;
+      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> <span class="dim">· images ${sel.seqStart}–${sel.seqStart + state.n - 1}</span></div>`;
+    $('details-shot').textContent = `Compo « ${sel.compName} » · ${state.n} images (${sel.seqStart}–${sel.seqStart + state.n - 1}), ` +
+      'telles qu\'elles arrivent à l\'effet (avec les effets placés au-dessus).';
     const w = $('shot-warnings');
     w.innerHTML = '';
     const note = (m, cls) => { const li = document.createElement('li'); li.textContent = m; if (cls) li.className = cls; w.appendChild(li); };
     sel.warnings.forEach((m) => note(m));
     if (sel.retimed) note('Remappage temporel ou étirement pris en compte : le suivi porte sur les images telles que la compo les montre.', 'note');
+    $('btn-details').classList.toggle('warn', sel.warnings.length > 0);  // avertissement à lire dans « Détails »
     $('summary').innerHTML = '';
     $('apply-msg').classList.add('hidden');
     $('log').textContent = '';
@@ -1399,21 +1404,6 @@
 
   function refresh() {
     const n = state.points.length, k = state.k, tracked = hasTrack();
-    const tool = { move: 'Déplacer', rotate: 'Tourner', scale: 'Mettre à l\'échelle' }[state.xform];
-    let hint = '';
-    if (state.tracking) hint = 'Suivi en cours : arrêtez (■) dès que la zone verte décroche, ce qui est déjà tracké est gardé.';
-    else if (!state.cur) hint = '';
-    else if (state.scrubbing && !tracked) hint = 'Relâchez sur une image nette où la surface est bien visible : elle devient la référence.';
-    else if (k !== state.ref && tracked && !shapeAt(k)) hint = 'Image non trackée : trackez jusqu\'ici depuis une image trackée.';
-    else if (n < 4) hint = `Cliquez les 4 coins de la surface (${n}/4).`;
-    else {
-      hint = k !== state.ref && tracked
-        ? (state.keys[k] ? 'Clé : la forme est imposée ici, le suivi est corrigé jusqu\'aux clés voisines (Suppr ou clic droit sur son losange : la retirer). ' : 'Toute retouche ici pose une clé (◆). ')
-        : (isDisc() ? 'Disque. ' : '');
-      hint += `${tool} : glissez le gizmo (W/E/R ; X : axes ${state.space === 'local' ? 'locaux' : 'du monde'}). ` +
-        'Coins et côtés se glissent ; les petits ronds jaunes arrondissent un coin (Maj : les 4, double-clic : aucun).';
-    }
-    $('hint').textContent = hint;
     $('btn-flip').classList.toggle('hidden', !isDisc() || state.mode2d);
     $('btn-flip').classList.toggle('on', state.flip);
     $('btn-undo').disabled = !state.undo.length || !!state.tracking;
@@ -1451,12 +1441,15 @@
     $('btn-key-prev').disabled = !state.n || !!state.tracking || nextKey(k, -1) === null;
     $('btn-key-next').disabled = !state.n || !!state.tracking || nextKey(k, 1) === null;
     if (state.shot) $('frame-label').textContent = `${state.shot.seqStart + k}` + (k === state.ref ? ' · réf' : '');
+    // seules indications affichées en permanence (le reste est dans l'aide)
     const badge = state.tracking ? `Suivi… image ${state.shot.seqStart + k}`
       : state.curThumbMissing ? 'Images en préparation…'
-        : (tracked && !shapeAt(k)) ? 'Non trackée' : '';
+        : !state.cur ? ''
+          : (state.scrubbing && !tracked) ? 'Relâchez sur une image nette : elle devient la référence'
+            : (tracked && !shapeAt(k)) ? 'Non trackée'
+              : n < 4 ? `Cliquez les 4 coins de la surface (${n}/4)` : '';
     $('badge').textContent = badge;
     $('badge').classList.toggle('hidden', !badge);
-    enable('s-result', !!state.pose && !!state.pose.ae && !state.tracking);
     $('btn-apply').disabled = !(state.pose && state.pose.ae && state.pose.rev === state.rev) || state.solving || !!state.tracking;
     draw();
   }
@@ -1671,6 +1664,7 @@
     const ul = $('summary');
     ul.innerHTML = '';
     const r = state.pose;
+    $('summary-empty').classList.toggle('hidden', !!r);
     if (!r) return;
     const add = (cls, txt) => { const li = document.createElement('li'); li.className = cls; li.textContent = txt; ul.appendChild(li); };
     const keys = Object.keys(usedHs()).map(Number).sort((a, b) => a - b);
@@ -1698,10 +1692,27 @@
     const box = $('apply-msg');
     box.classList.remove('hidden');
     box.style.color = out.ok ? '' : 'var(--err)';
-    box.textContent = out.ok
-      ? `Tracking appliqué à l'effet : ${out.frames} images clés. Sélectionnez l'effet pour voir la grille dans la compo ; ` +
-        'sa section « Créer » ajoute un null, un solide ou un texte posés sur la surface.'
-      : out.msg;
+    box.textContent = out.ok ? `Tracking appliqué à l'effet : ${out.frames} images clés.` : out.msg;
+    if (out.ok) toast(`Tracking appliqué : ${out.frames} images clés.`, 3000, 'ok');
+    else toast(out.msg, 12000);
+    log(box.textContent);
+  });
+
+  // ------------------------------------------------------------------ aide et détails
+  const sheets = ['sheet-help', 'sheet-details'];
+  function openSheet(id) {
+    const was = !$(id).classList.contains('hidden');
+    sheets.forEach((s) => $(s).classList.add('hidden'));
+    if (!was) $(id).classList.remove('hidden');
+  }
+  $('btn-help').addEventListener('click', () => openSheet('sheet-help'));
+  $('btn-details').addEventListener('click', () => openSheet('sheet-details'));
+  sheets.forEach((id) => $(id).addEventListener('click', (ev) => {
+    // clic sur le fond ou sur × : fermer
+    if (ev.target === $(id) || ev.target.classList.contains('close')) $(id).classList.add('hidden');
+  }));
+  window.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') sheets.forEach((s) => $(s).classList.add('hidden'));
   });
 
   // ------------------------------------------------------------------ démarrage

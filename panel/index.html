@@ -8,14 +8,17 @@
 <body>
   <!-- Reçoit le clavier : dans AE, un panneau n'a les touches que si un champ de saisie a le focus -->
   <input id="keysink" aria-hidden="true" tabindex="-1" autocomplete="off">
-  <!-- Calque chargé (par le script « Tracker le calque » ou le bouton ↻) -->
+  <!-- Calque chargé : nom + plage d'images ; aide et détails à droite -->
   <header>
     <div id="shot" class="shot">
       <div id="shot-empty" class="dim">Aucun calque — appliquez l'effet « 3D Surface Tracker » à un calque, puis cliquez « Ouvrir le tracker ».</div>
       <div id="shot-info" class="hidden"></div>
     </div>
+    <button id="btn-details" class="link" title="Calque, résultat du tracking, journal">Détails</button>
+    <button id="btn-help" class="tool icon help" title="Aide">
+      <svg class="i512" viewBox="0 0 512 512"><path d="M77.3488 414.83C159.415 511.232 352.585 511.232 434.652 414.83C510.281 326.034 504.54 152.247 413.55 76.2512C332.032 8.1552 179.932 8.1552 98.4506 76.2512C7.46084 152.247 1.71912 326.034 77.3488 414.83Z"/><path d="M210.141 219.428H228.317C238.016 219.428 247.318 223.281 254.177 230.14C261.035 236.998 264.888 246.3 264.888 256V356.023M264.888 356.023H210.653M264.888 356.023H319.635M265.4 136.045V147.858"/></svg>
+    </button>
   </header>
-  <ul id="shot-warnings" class="warnings"></ul>
 
   <!-- Surface + suivi -->
   <section id="s-surface" class="disabled">
@@ -75,7 +78,7 @@
     </div>
 
     <div class="transport">
-      <div class="seg">
+      <div class="grp"><div class="cap">Tracking</div><div class="seg">
         <button id="btn-back-all" class="tool icon trk" data-dir="-1" data-count="0" title="Tracker en arrière, jusqu'à la clé précédente ou au début">
           <svg class="solid" viewBox="0 0 24 24"><path d="M11.5 6v12L3 12zM21 6v12l-8.5-6z"/></svg>
         </button>
@@ -91,8 +94,8 @@
         <button id="btn-fwd-all" class="tool icon trk" data-dir="1" data-count="0" title="Tracker en avant, jusqu'à la clé suivante ou à la fin">
           <svg class="solid" viewBox="0 0 24 24"><path d="M3 6v12l8.5-6zM12.5 6v12l8.5-6z"/></svg>
         </button>
-      </div>
-      <div class="seg">
+      </div></div>
+      <div class="grp"><div class="cap">Clés</div><div class="seg">
         <button id="btn-key-prev" class="tool icon" title="Clé précédente">
           <svg viewBox="0 0 24 24"><path d="M15 6l6 6-6 6-6-6zM7 8l-4 4 4 4"/></svg>
         </button>
@@ -102,8 +105,8 @@
         <button id="btn-key-next" class="tool icon" title="Clé suivante">
           <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6-6-6zM17 8l4 4-4 4"/></svg>
         </button>
-      </div>
-      <div class="seg">
+      </div></div>
+      <div class="grp"><div class="cap">Lecture <span id="frame-label" class="frame-label">—</span></div><div class="seg">
         <button id="btn-step-back" class="tool icon" title="Image précédente (←)">
           <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
         </button>
@@ -113,13 +116,12 @@
         <button id="btn-step-fwd" class="tool icon" title="Image suivante (→)">
           <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
         </button>
-      </div>
+      </div></div>
       <span class="grow"></span>
-      <span id="frame-label" class="frame-label mono">—</span>
+      <button id="btn-apply" class="primary" disabled title="Écrit le tracking dans l'effet du calque (images clés)">Appliquer le tracking</button>
     </div>
     <canvas id="timeline"></canvas>
 
-    <div id="hint" class="hint"></div>
     <!-- Focale : seulement si la vidéo n'a pas de métadonnées -->
     <div id="focal-wrap" class="focal hidden">
       <span class="warn-text">Focale inconnue</span>
@@ -128,16 +130,63 @@
     </div>
   </section>
 
-  <!-- Résultat -->
-  <section id="s-result" class="disabled">
-    <ul id="summary" class="summary"></ul>
-    <div class="row export">
-      <span class="grow dim" id="apply-hint">Le tracking est écrit dans l'effet : la grille s'affiche dans AE quand l'effet est sélectionné, et ses boutons créent null, solide ou texte.</span>
-      <button id="btn-apply" class="primary" disabled>Appliquer le tracking</button>
+  <!-- Détails : tout ce qui n'est pas utile en permanence -->
+  <div id="sheet-details" class="sheet hidden">
+    <div class="card">
+      <div class="card-head"><b>Détails</b><button class="close" title="Fermer (Échap)">×</button></div>
+      <div id="details-shot" class="dim"></div>
+      <ul id="shot-warnings" class="warnings"></ul>
+      <h4>Tracking</h4>
+      <ul id="summary" class="summary"></ul>
+      <div id="summary-empty" class="dim">Pas encore de tracking.</div>
+      <div id="apply-msg" class="info hidden"></div>
+      <h4>Journal</h4>
+      <pre id="log"></pre>
     </div>
-    <div id="apply-msg" class="info hidden"></div>
-    <details id="log-box"><summary>Journal</summary><pre id="log"></pre></details>
-  </section>
+  </div>
+
+  <!-- Aide -->
+  <div id="sheet-help" class="sheet hidden">
+    <div class="card">
+      <div class="card-head"><b>Aide</b><button class="close" title="Fermer (Échap)">×</button></div>
+      <h4>Démarrer</h4>
+      <ul>
+        <li>Placez-vous sur une image nette où la surface est bien visible : elle devient la <b>référence</b>.</li>
+        <li>Cliquez les 4 coins de la surface. Retour arrière retire le dernier coin.</li>
+        <li>Coins et côtés se glissent ; les petits ronds jaunes arrondissent un coin (Maj : les 4 à la fois, double-clic : aucun arrondi).</li>
+        <li>2D : la surface reste face à la caméra (position, échelle, rotation), comme un tracking 2D classique. 3D : orientation complète.</li>
+      </ul>
+      <h4>Tracking</h4>
+      <ul>
+        <li>Les boutons trackent en arrière ou en avant (une image, ou jusqu'à la clé voisine / au bout), ou dans les deux sens.</li>
+        <li>Arrêtez (■) dès que la zone verte décroche : ce qui est déjà tracké est gardé.</li>
+        <li>Le suivi part de la référence ou d'une image déjà trackée.</li>
+      </ul>
+      <h4>Clés</h4>
+      <ul>
+        <li>Sur une image trackée, toute retouche de la forme pose une clé (◆) : la forme y est imposée et le suivi est corrigé jusqu'aux clés voisines.</li>
+        <li>Les clés servent aussi de modèles au tracker, qui dérive moins.</li>
+        <li>Pour retirer une clé : Suppr sur cette image, bouton ◆, ou clic droit sur son losange dans la timeline.</li>
+      </ul>
+      <h4>Appliquer</h4>
+      <ul>
+        <li>« Appliquer le tracking » écrit le résultat dans l'effet du calque. Rien n'est enregistré avant.</li>
+        <li>La grille s'affiche dans la compo quand l'effet est sélectionné ; sa section « Créer » ajoute caméra, null, texte, solide ou calque de forme.</li>
+        <li>À la réouverture, le tracker retrouve le tracking et les clés depuis l'effet.</li>
+      </ul>
+      <h4>Raccourcis</h4>
+      <table class="keys">
+        <tr><td>W · E · R</td><td>Déplacer · Tourner · Mettre à l'échelle</td></tr>
+        <tr><td>X</td><td>Axes locaux / du monde</td></tr>
+        <tr><td>← →</td><td>Image précédente / suivante (Maj : 10 images)</td></tr>
+        <tr><td>⌘Z · ⇧⌘Z</td><td>Annuler · Rétablir</td></tr>
+        <tr><td>Suppr</td><td>Retirer la clé de l'image</td></tr>
+        <tr><td>Espace + glisser</td><td>Déplacer la vue (ou clic droit / molette-clic)</td></tr>
+        <tr><td>Molette</td><td>Zoomer</td></tr>
+        <tr><td>Double-clic</td><td>Recadrer la vue</td></tr>
+      </table>
+    </div>
+  </div>
 
   <div id="toast" class="hidden"></div>
   <script src="js/main.js"></script>
