@@ -503,38 +503,30 @@ const char* CREATE_SCRIPT = R"JSX(
     }
     var k = comp.width / L.width;   // pixels de l'image du calque -> pixels de la compo
     var base = "ST " + L.name;
-    // instants des images clés de la pose (une seule valeur si rien n'est animé)
-    var px = P("Position X"), times = [];
-    for (i = 1; i <= px.numKeys; i++) times.push(px.keyTime(i));
-    function copy(prop, f, src) {  // f(t) : valeur à l'instant t
-        if (src.numKeys === 0) { prop.setValue(f(comp.time)); return; }
-        var ts = [], vs = [];
-        for (var j = 1; j <= src.numKeys; j++) { ts.push(src.keyTime(j)); vs.push(f(src.keyTime(j))); }
-        prop.setValuesAtTimes(ts, vs);
-    }
-    function at(name, t) { return P(name).valueAtTime(t, false); }
+    // Les calques créés lisent l'effet par expressions : un nouveau « Appliquer le tracking » les met
+    // à jour sans les recréer. (AE corrige les expressions si le calque ou l'effet est renommé.)
+    function q(t) { return '"' + String(t).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'; }
+    var HEAD = "var fx = thisComp.layer(" + q(L.name) + ").effect(" + q(fx.name) + ");\n" +
+               "var k = thisComp.width / thisComp.layer(" + q(L.name) + ").width;\n";
+    function link(prop, body) { prop.expression = HEAD + body; }
     app.beginUndoGroup("3D Surface Tracker : créer les calques");
 
     // caméra fixe, centrée ; son zoom suit celui de l'objectif
     var cam = comp.layers.addCamera(base + " Caméra", [comp.width / 2, comp.height / 2]);
     cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
-    cam.property("ADBE Transform Group").property("ADBE Position").setValue([comp.width / 2, comp.height / 2, -v("Distance caméra") * k]);
     cam.property("ADBE Transform Group").property("ADBE Orientation").setValue([0, 0, 0]);
-    copy(cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom"),
-         function (t) { return at("Zoom caméra", t) * k; }, P("Zoom caméra"));
+    link(cam.property("ADBE Transform Group").property("ADBE Position"),
+         '[thisComp.width / 2, thisComp.height / 2, -fx("Distance caméra") * k]');
+    link(cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom"), 'fx("Zoom caméra") * k');
 
-    // null au centre de la surface : copie des images clés de position et d'orientation
+    // null au centre de la surface : position et orientation de l'effet
     var nul = comp.layers.addNull();
     nul.name = base + " Surface";
     nul.threeDLayer = true;
     var NT = nul.property("ADBE Transform Group");
     NT.property("ADBE Anchor Point").setValue([0, 0, 0]);
-    copy(NT.property("ADBE Position"), function (t) {
-        return [at("Position X", t) * k, at("Position Y", t) * k, at("Position Z", t) * k];
-    }, px);
-    copy(NT.property("ADBE Orientation"), function (t) {
-        return [at("Orientation X", t), at("Orientation Y", t), at("Orientation Z", t)];
-    }, px);
+    link(NT.property("ADBE Position"), '[fx("Position X"), fx("Position Y"), fx("Position Z")] * k');
+    link(NT.property("ADBE Orientation"), '[fx("Orientation X"), fx("Orientation Y"), fx("Orientation Z")]');
 
     // texte et solide, enfants du null, au centre de la surface
     var w = Math.max(4, Math.round(v("Largeur") * k)), h = Math.max(4, Math.round(v("Hauteur") * k));
@@ -549,6 +541,11 @@ const char* CREATE_SCRIPT = R"JSX(
         T.property("ADBE Rotate Z").setValue(0);
         return lay;
     }
+    // échelle : le calque (créé à w x h) suit Largeur et Hauteur de l'effet
+    function fitSize(lay) {
+        link(lay.property("ADBE Transform Group").property("ADBE Scale"),
+             '[100 * fx("Largeur") * k / ' + w + ', 100 * fx("Hauteur") * k / ' + h + ', 100]');
+    }
     if (P("Solide").value) {
         var sol = comp.layers.addSolid([0.15, 0.55, 1.0], base + " Solide", w, h, comp.pixelAspect);
         sol.property("ADBE Transform Group").property("ADBE Opacity").setValue(60);
@@ -557,7 +554,7 @@ const char* CREATE_SCRIPT = R"JSX(
         var sh = roundedShape(w, h, r);
         if (sh) sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(sh);
         child(sol);
-        sol.property("ADBE Transform Group").property("ADBE Scale").setValue([100 * v("Largeur") * k / w, 100 * v("Hauteur") * k / h, 100]);
+        fitSize(sol);
     }
     if (P("Calque de forme").value) {  // tracé du contour de la surface, centré sur le null
         var shl = comp.layers.addShape();
@@ -584,6 +581,7 @@ const char* CREATE_SCRIPT = R"JSX(
         fl.property("ADBE Vector Fill Color").setValue([0, 0.86, 1]);
         fl.property("ADBE Vector Fill Opacity").setValue(25);
         child(shl);
+        fitSize(shl);
     }
     if (P("Texte").value) {
         var txt = comp.layers.addText("Texte");

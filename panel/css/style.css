@@ -18,7 +18,12 @@
 #keysink { position: fixed; left: -200px; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
 html, body { margin: 0; background: var(--bg); color: var(--text);
   font: 13px/1.4 -apple-system, "Segoe UI", sans-serif; }
-body { padding: 8px 10px 14px; overflow-y: auto; }
+/* le panneau occupe toute la hauteur : l'image prend la place restante */
+html, body { height: 100%; }
+body { padding: 8px 10px 10px; overflow: hidden; display: flex; flex-direction: column; }
+header, #shot-warnings { flex: none; }
+#s-surface { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; }
+#s-surface > * { flex: none; }
 
 /* en-tête : calque chargé */
 header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -66,8 +71,7 @@ svg.ico { color: var(--dim); flex: none; }
 label.inline { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
 input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; height: 22px; }
 
-#canvas-wrap { position: relative; background: #151515; border-radius: 6px; overflow: hidden;
-  height: 54vh; min-height: 260px; }
+#s-surface > #canvas-wrap { flex: 1; min-height: 160px; position: relative; background: #151515; border-radius: 6px; overflow: hidden; }
 #view { width: 100%; height: 100%; display: block; cursor: crosshair; }
 #view.pan { cursor: grab; }
 #canvas-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -138,7 +142,6 @@ pre#log { max-height: 180px; overflow: auto; background: #1d1d1d; padding: 8px; 
 
 #toast { position: fixed; left: 10px; right: 10px; bottom: 10px; z-index: 30; background: #3a2524; color: #f2c9c6;
   border: 1px solid var(--err); border-radius: 8px; padding: 10px 12px; font-size: 12px; white-space: pre-wrap; }
-#toast.ok { background: #213a29; color: #c6f2d2; border-color: var(--ok); }
 
 /* menu « effacer » */
 .pop-wrap { position: relative; }

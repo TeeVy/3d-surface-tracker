@@ -81,10 +81,9 @@
   };
 
   // ------------------------------------------------------------------ utilitaires
-  function toast(msg, ms, kind) {
+  function toast(msg, ms) {
     const t = $('toast');
     t.textContent = msg;
-    t.classList.toggle('ok', kind === 'ok');
     t.classList.remove('hidden');
     clearTimeout(toast._t);
     toast._t = setTimeout(() => t.classList.add('hidden'), ms || 7000);
@@ -328,7 +327,6 @@
     if (sel.retimed) note('Remappage temporel ou étirement pris en compte : le suivi porte sur les images telles que la compo les montre.', 'note');
     $('btn-details').classList.toggle('warn', sel.warnings.length > 0);  // avertissement à lire dans « Détails »
     $('summary').innerHTML = '';
-    $('apply-msg').classList.add('hidden');
     $('log').textContent = '';
 
     try {
@@ -1689,13 +1687,10 @@
         keyDeltas: keyFrames().map(keyDelta),
       }));
     refresh();
-    const box = $('apply-msg');
-    box.classList.remove('hidden');
-    box.style.color = out.ok ? '' : 'var(--err)';
-    box.textContent = out.ok ? `Tracking appliqué à l'effet : ${out.frames} images clés.` : out.msg;
-    if (out.ok) toast(`Tracking appliqué : ${out.frames} images clés.`, 3000, 'ok');
-    else toast(out.msg, 12000);
-    log(box.textContent);
+    if (!out.ok) { toast(out.msg, 12000); log(out.msg); return; }
+    // le tracking est dans l'effet : le panneau n'a plus rien à faire, il se ferme
+    if (state.eng) { state.eng.close(); state.eng = null; }
+    window.__adobe_cep__.closeExtension();
   });
 
   // ------------------------------------------------------------------ aide et détails
