@@ -504,34 +504,52 @@ const char* CREATE_SCRIPT = R"JSX(
     var k = comp.width / L.width;   // pixels de l'image du calque -> pixels de la compo
     var base = "ST " + L.name;
     // Les calques créés lisent l'effet par expressions : un nouveau « Appliquer le tracking » les met
-    // à jour sans les recréer. (AE corrige les expressions si le calque ou l'effet est renommé.)
+    // à jour sans les recréer. Le calque tracké est désigné par un Contrôle de calque posé sur le null :
+    // ce lien suit le calque lui-même (ni son nom, que d'autres calques peuvent partager, ni sa place).
+    // La caméra (qui ne peut pas porter d'effet) passe par le null, les enfants par leur parent.
     function q(t) { return '"' + String(t).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'; }
-    var HEAD = "var fx = thisComp.layer(" + q(L.name) + ").effect(" + q(fx.name) + ");\n" +
-               "var k = thisComp.width / thisComp.layer(" + q(L.name) + ").width;\n";
-    function link(prop, body) { prop.expression = HEAD + body; }
+    function unique(n) {  // nom libre dans la compo
+        var used = {}, s = n, j = 2;
+        for (var i = 1; i <= comp.numLayers; i++) used[comp.layer(i).name] = true;
+        while (used[s]) s = n + " " + j++;
+        return s;
+    }
+    var CTRL = "Calque tracké";
+    function head(src) {  // src : expression du calque qui porte le Contrôle de calque
+        return "var L = " + src + ".effect(" + q(CTRL) + ")(1);\n" +
+               "var fx = L.effect(" + q(fx.name) + ");\n" +
+               "var k = thisComp.width / L.width;\n";
+    }
     app.beginUndoGroup("3D Surface Tracker : créer les calques");
 
-    // caméra fixe, centrée ; son zoom suit celui de l'objectif
-    var cam = comp.layers.addCamera(base + " Caméra", [comp.width / 2, comp.height / 2]);
-    cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
-    cam.property("ADBE Transform Group").property("ADBE Orientation").setValue([0, 0, 0]);
-    link(cam.property("ADBE Transform Group").property("ADBE Position"),
-         '[thisComp.width / 2, thisComp.height / 2, -fx("Distance caméra") * k]');
-    link(cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom"), 'fx("Zoom caméra") * k');
-
-    // null au centre de la surface : position et orientation de l'effet
+    // null au centre de la surface : position et orientation de l'effet ; posé juste au-dessus du calque
     var nul = comp.layers.addNull();
-    nul.name = base + " Surface";
+    nul.name = unique(base + " Surface");
     nul.threeDLayer = true;
+    nul.moveBefore(L);
+    var ctl = nul.property("ADBE Effect Parade").addProperty("ADBE Layer Control");
+    ctl.name = CTRL;
+    ctl.property(1).setValue(L.index);
     var NT = nul.property("ADBE Transform Group");
     NT.property("ADBE Anchor Point").setValue([0, 0, 0]);
-    link(NT.property("ADBE Position"), '[fx("Position X"), fx("Position Y"), fx("Position Z")] * k');
-    link(NT.property("ADBE Orientation"), '[fx("Orientation X"), fx("Orientation Y"), fx("Orientation Z")]');
+    NT.property("ADBE Position").expression = head("thisLayer") + '[fx("Position X"), fx("Position Y"), fx("Position Z")] * k';
+    NT.property("ADBE Orientation").expression = head("thisLayer") + '[fx("Orientation X"), fx("Orientation Y"), fx("Orientation Z")]';
+
+    // caméra fixe, centrée, au-dessus du null ; son zoom suit celui de l'objectif
+    var cam = comp.layers.addCamera(unique(base + " Caméra"), [comp.width / 2, comp.height / 2]);
+    cam.moveBefore(nul);
+    cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
+    cam.property("ADBE Transform Group").property("ADBE Orientation").setValue([0, 0, 0]);
+    var viaNull = head("thisComp.layer(" + q(nul.name) + ")");
+    cam.property("ADBE Transform Group").property("ADBE Position").expression =
+        viaNull + '[thisComp.width / 2, thisComp.height / 2, -fx("Distance caméra") * k]';
+    cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom").expression = viaNull + 'fx("Zoom caméra") * k';
 
     // texte et solide, enfants du null, au centre de la surface
     var w = Math.max(4, Math.round(v("Largeur") * k)), h = Math.max(4, Math.round(v("Hauteur") * k));
     function child(lay) {
         lay.threeDLayer = true;
+        lay.moveBefore(L);
         lay.parent = nul;
         var T = lay.property("ADBE Transform Group");
         T.property("ADBE Position").setValue([0, 0, 0]);
@@ -543,11 +561,11 @@ const char* CREATE_SCRIPT = R"JSX(
     }
     // échelle : le calque (créé à w x h) suit Largeur et Hauteur de l'effet
     function fitSize(lay) {
-        link(lay.property("ADBE Transform Group").property("ADBE Scale"),
-             '[100 * fx("Largeur") * k / ' + w + ', 100 * fx("Hauteur") * k / ' + h + ', 100]');
+        lay.property("ADBE Transform Group").property("ADBE Scale").expression = head("parent") +
+            '[100 * fx("Largeur") * k / ' + w + ', 100 * fx("Hauteur") * k / ' + h + ', 100]';
     }
     if (P("Solide").value) {
-        var sol = comp.layers.addSolid([0.15, 0.55, 1.0], base + " Solide", w, h, comp.pixelAspect);
+        var sol = comp.layers.addSolid([0.15, 0.55, 1.0], unique(base + " Solide"), w, h, comp.pixelAspect);
         sol.property("ADBE Transform Group").property("ADBE Opacity").setValue(60);
         var r = P("Forme").value === 2 ? [1, 1, 1, 1]
             : [v("Arrondi HG") / 100, v("Arrondi HD") / 100, v("Arrondi BD") / 100, v("Arrondi BG") / 100];
@@ -558,7 +576,7 @@ const char* CREATE_SCRIPT = R"JSX(
     }
     if (P("Calque de forme").value) {  // tracé du contour de la surface, centré sur le null
         var shl = comp.layers.addShape();
-        shl.name = base + " Forme";
+        shl.name = unique(base + " Forme");
         var rr = P("Forme").value === 2 ? [1, 1, 1, 1]
             : [v("Arrondi HG") / 100, v("Arrondi HD") / 100, v("Arrondi BD") / 100, v("Arrondi BG") / 100];
         var path = roundedShape(w, h, rr);
@@ -585,7 +603,7 @@ const char* CREATE_SCRIPT = R"JSX(
     }
     if (P("Texte").value) {
         var txt = comp.layers.addText("Texte");
-        txt.name = base + " Texte";
+        txt.name = unique(base + " Texte");
         var tp = txt.property("ADBE Text Properties").property("ADBE Text Document"), td = tp.value;
         td.fontSize = Math.max(6, Math.round(0.22 * Math.min(w, h)));
         td.fillColor = [1, 1, 1];
