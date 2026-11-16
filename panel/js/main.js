@@ -81,9 +81,10 @@
   };
 
   // ------------------------------------------------------------------ utilitaires
-  function toast(msg, ms) {
+  function toast(msg, ms, kind) {
     const t = $('toast');
     t.textContent = msg;
+    t.classList.toggle('ok', kind === 'ok');
     t.classList.remove('hidden');
     clearTimeout(toast._t);
     toast._t = setTimeout(() => t.classList.add('hidden'), ms || 7000);
@@ -1688,9 +1689,8 @@
       }));
     refresh();
     if (!out.ok) { toast(out.msg, 12000); log(out.msg); return; }
-    // le tracking est dans l'effet : le panneau n'a plus rien à faire, il se ferme
-    if (state.eng) { state.eng.close(); state.eng = null; }
-    window.__adobe_cep__.closeExtension();
+    // (pas de fermeture automatique : AE perd alors la trace du panneau, qui ne se rouvre plus)
+    toast(`Tracking appliqué (${out.frames} images clés). Vous pouvez fermer le panneau.`, 8000, 'ok');
   });
 
   // ------------------------------------------------------------------ aide et détails

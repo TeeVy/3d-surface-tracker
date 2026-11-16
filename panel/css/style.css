@@ -142,6 +142,7 @@ pre#log { max-height: 180px; overflow: auto; background: #1d1d1d; padding: 8px; 
 
 #toast { position: fixed; left: 10px; right: 10px; bottom: 10px; z-index: 30; background: #3a2524; color: #f2c9c6;
   border: 1px solid var(--err); border-radius: 8px; padding: 10px 12px; font-size: 12px; white-space: pre-wrap; }
+#toast.ok { background: #213a29; color: #c6f2d2; border-color: var(--ok); }
 
 /* menu « effacer » */
 .pop-wrap { position: relative; }
