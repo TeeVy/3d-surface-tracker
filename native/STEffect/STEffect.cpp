@@ -501,12 +501,31 @@ const char* CREATE_SCRIPT = R"JSX(
         alert(TITLE + "\n\nAucun tracking appliqué : ouvrez le tracker, trackez, puis « Appliquer le tracking ».");
         return;
     }
-    var k = comp.width / L.width;   // pixels de l'image du calque -> pixels de la compo
+    // Les calques créés sont rattachés au calque tracké (null enfant du calque) : ses position, échelle
+    // et rotation s'appliquent à eux comme à l'image, donc ils restent calés même si le calque est
+    // transformé. C'est exact tant que le centre de l'image tombe au centre de la compo (là où la
+    // caméra d'AE vise) ; sinon, il faut précomposer.
+    var T = L.property("ADBE Transform Group");
+    var why = L.threeDLayer ? "est un calque 3D" : L.parent ? "a un parent" : "";
+    if (!why) {
+        var a = T.property("ADBE Anchor Point").valueAtTime(comp.time, false);
+        var p = T.property("ADBE Position").valueAtTime(comp.time, false);
+        var sc = T.property("ADBE Scale").valueAtTime(comp.time, false);
+        var th = T.property("ADBE Rotate Z").valueAtTime(comp.time, false) * Math.PI / 180;
+        var dx = (L.width / 2 - a[0]) * sc[0] / 100, dy = (L.height / 2 - a[1]) * sc[1] / 100;
+        var cx = p[0] + dx * Math.cos(th) - dy * Math.sin(th), cy = p[1] + dx * Math.sin(th) + dy * Math.cos(th);
+        if (Math.abs(cx - comp.width / 2) > 1 || Math.abs(cy - comp.height / 2) > 1)
+            why = "n'est pas centré dans la compo (le centre de son image doit tomber au centre de la compo)";
+    }
+    if (why) {
+        alert(TITLE + "\n\nLe calque tracké " + why + " : la caméra ne peut pas reproduire cette mise en place.\n\n" +
+              "Précomposez-le (le tracking suit dans la précomp), ou recentrez-le.");
+        return;
+    }
     var base = "ST " + L.name;
     // Les calques créés lisent l'effet par expressions : un nouveau « Appliquer le tracking » les met
-    // à jour sans les recréer. Le calque tracké est désigné par un Contrôle de calque posé sur le null :
-    // ce lien suit le calque lui-même (ni son nom, que d'autres calques peuvent partager, ni sa place).
-    // La caméra (qui ne peut pas porter d'effet) passe par le null, les enfants par leur parent.
+    // à jour sans les recréer. Le lien passe par la parenté (qui suit le calque, pas son nom) ;
+    // la caméra, qui ne peut pas avoir ce parent, passe par le null.
     function q(t) { return '"' + String(t).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'; }
     function unique(n) {  // nom libre dans la compo
         var used = {}, s = n, j = 2;
@@ -514,39 +533,33 @@ const char* CREATE_SCRIPT = R"JSX(
         while (used[s]) s = n + " " + j++;
         return s;
     }
-    var CTRL = "Calque tracké";
-    function head(src) {  // src : expression du calque qui porte le Contrôle de calque
-        return "var L = " + src + ".effect(" + q(CTRL) + ")(1);\n" +
-               "var fx = L.effect(" + q(fx.name) + ");\n" +
-               "var k = thisComp.width / L.width;\n";
-    }
+    function head(src) { return "var fx = " + src + ".effect(" + q(fx.name) + ");\n"; }  // src : le calque tracké
     app.beginUndoGroup("3D Surface Tracker : créer les calques");
 
-    // null au centre de la surface : position et orientation de l'effet ; posé juste au-dessus du calque
+    // null au centre de la surface, enfant du calque tracké : position (pixels de l'image) et orientation de l'effet
     var nul = comp.layers.addNull();
     nul.name = unique(base + " Surface");
     nul.threeDLayer = true;
     nul.moveBefore(L);
-    var ctl = nul.property("ADBE Effect Parade").addProperty("ADBE Layer Control");
-    ctl.name = CTRL;
-    ctl.property(1).setValue(L.index);
+    nul.parent = L;
     var NT = nul.property("ADBE Transform Group");
     NT.property("ADBE Anchor Point").setValue([0, 0, 0]);
-    NT.property("ADBE Position").expression = head("thisLayer") + '[fx("Position X"), fx("Position Y"), fx("Position Z")] * k';
-    NT.property("ADBE Orientation").expression = head("thisLayer") + '[fx("Orientation X"), fx("Orientation Y"), fx("Orientation Z")]';
+    NT.property("ADBE Scale").setValue([100, 100, 100]);
+    NT.property("ADBE Position").expression = head("parent") + '[fx("Position X"), fx("Position Y"), fx("Position Z")]';
+    NT.property("ADBE Orientation").expression = head("parent") + '[fx("Orientation X"), fx("Orientation Y"), fx("Orientation Z")]';
 
     // caméra fixe, centrée, au-dessus du null ; son zoom suit celui de l'objectif
     var cam = comp.layers.addCamera(unique(base + " Caméra"), [comp.width / 2, comp.height / 2]);
     cam.moveBefore(nul);
     cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
     cam.property("ADBE Transform Group").property("ADBE Orientation").setValue([0, 0, 0]);
-    var viaNull = head("thisComp.layer(" + q(nul.name) + ")");
+    var viaNull = head("thisComp.layer(" + q(nul.name) + ").parent");
     cam.property("ADBE Transform Group").property("ADBE Position").expression =
-        viaNull + '[thisComp.width / 2, thisComp.height / 2, -fx("Distance caméra") * k]';
-    cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom").expression = viaNull + 'fx("Zoom caméra") * k';
+        viaNull + '[thisComp.width / 2, thisComp.height / 2, -fx("Distance caméra")]';
+    cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom").expression = viaNull + 'fx("Zoom caméra")';
 
-    // texte et solide, enfants du null, au centre de la surface
-    var w = Math.max(4, Math.round(v("Largeur") * k)), h = Math.max(4, Math.round(v("Hauteur") * k));
+    // texte, solide, forme : enfants du null, au centre de la surface (tailles en pixels de l'image)
+    var w = Math.max(4, Math.round(v("Largeur"))), h = Math.max(4, Math.round(v("Hauteur")));
     function child(lay) {
         lay.threeDLayer = true;
         lay.moveBefore(L);
@@ -561,8 +574,8 @@ const char* CREATE_SCRIPT = R"JSX(
     }
     // échelle : le calque (créé à w x h) suit Largeur et Hauteur de l'effet
     function fitSize(lay) {
-        lay.property("ADBE Transform Group").property("ADBE Scale").expression = head("parent") +
-            '[100 * fx("Largeur") * k / ' + w + ', 100 * fx("Hauteur") * k / ' + h + ', 100]';
+        lay.property("ADBE Transform Group").property("ADBE Scale").expression = head("parent.parent") +
+            '[100 * fx("Largeur") / ' + w + ', 100 * fx("Hauteur") / ' + h + ', 100]';
     }
     if (P("Solide").value) {
         var sol = comp.layers.addSolid([0.15, 0.55, 1.0], unique(base + " Solide"), w, h, comp.pixelAspect);
@@ -586,7 +599,7 @@ const char* CREATE_SCRIPT = R"JSX(
             path.closed = true;
         }
         var vs = path.vertices;
-        for (var q = 0; q < vs.length; q++) vs[q] = [vs[q][0] - w / 2, vs[q][1] - h / 2];
+        for (var m = 0; m < vs.length; m++) vs[m] = [vs[m][0] - w / 2, vs[m][1] - h / 2];
         path.vertices = vs;
         var grp = shl.property("ADBE Root Vectors Group").addProperty("ADBE Vector Group");
         grp.name = "Surface";
