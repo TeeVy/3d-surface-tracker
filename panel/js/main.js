@@ -53,7 +53,6 @@
     // --- état annulable
     points: [],          // 4 coins, en pixels de l'image, sur l'image de référence
     round: [0, 0, 0, 0], // arrondi des coins HG, HD, BD, BG, 0..100 (tous à 100 = disque)
-    flip: false,         // disque : autre inclinaison
     mode2d: false,       // 2D : surface face à la caméra
     Hs: {},              // k -> homographie référence -> image k trouvée par le suivi (9 nombres)
     keys: {},            // k -> homographie fixée à la main sur cette image (clé de correction)
@@ -269,7 +268,7 @@
   function resetEdit() {
     stopPlay();
     Object.assign(state, {
-      points: [], round: [0, 0, 0, 0], flip: false, mode2d: false, Hs: {}, keys: {}, conf: {}, pose: null,
+      points: [], round: [0, 0, 0, 0], mode2d: false, Hs: {}, keys: {}, conf: {}, pose: null,
       undo: [], redo: [], full: new Map(), cur: null, loaded: new Set(), thumbs: new Map(),
     });
     state.rev++;
@@ -415,7 +414,7 @@
       if (k !== ref && delta[k]) keys[k] = fitH(refC, eff[k]);
     });
     Object.assign(state, {
-      points: refC, round: d.disc ? [100, 100, 100, 100] : d.round.map((x) => Math.round(x)), flip: false,
+      points: refC, round: d.disc ? [100, 100, 100, 100] : d.round.map((x) => Math.round(x)),
       mode2d: d.mode2d, ref, Hs, conf, keys,
     });
     state.k = state.ref;
@@ -643,10 +642,69 @@
   function chosenNormal() {
     if (state.mode2d || !isDisc() || !ready()) return null;
     const m = modelOf(state.points);
-    if (!m) return null;
-    let n = axesOf(m).n;
-    if (state.flip) { const d = norm(m.C); n = norm(add(scale(d, 2 * dot(n, d)), scale(n, -1))); }
-    return n;
+    return m ? axesOf(m).n : null;
+  }
+  /** Valeurs et vecteurs propres d'une matrice symétrique 3x3 (Jacobi). */
+  function eigSym3(A) {
+    const a = A.map((r) => r.slice()), V = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    for (let sweep = 0; sweep < 50; sweep++) {
+      const off = Math.abs(a[0][1]) + Math.abs(a[0][2]) + Math.abs(a[1][2]);
+      if (off < 1e-14 * (Math.abs(a[0][0]) + Math.abs(a[1][1]) + Math.abs(a[2][2]))) break;
+      for (const [p, q] of [[0, 1], [0, 2], [1, 2]]) {
+        if (Math.abs(a[p][q]) < 1e-300) continue;
+        const th = 0.5 * Math.atan2(2 * a[p][q], a[q][q] - a[p][p]), c = Math.cos(th), s = Math.sin(th);
+        for (let k = 0; k < 3; k++) {  // a <- a J
+          const akp = a[k][p], akq = a[k][q];
+          a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq;
+        }
+        for (let k = 0; k < 3; k++) {  // a <- J^T a
+          const apk = a[p][k], aqk = a[q][k];
+          a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk;
+        }
+        for (let k = 0; k < 3; k++) {
+          const vkp = V[k][p], vkq = V[k][q];
+          V[k][p] = c * vkp - s * vkq; V[k][q] = s * vkp + c * vkq;
+        }
+      }
+    }
+    return [0, 1, 2].map((i) => ({ val: a[i][i], vec: [V[0][i], V[1][i], V[2][i]] }));
+  }
+  /** Disque : l'autre inclinaison qui donne exactement la même ellipse à l'image. Le cône de vue
+   *  qui s'appuie sur l'ellipse a deux familles de sections circulaires ; on prend le cercle de
+   *  l'autre famille et on renvoie les coins de son carré (dans le sens des coins actuels). */
+  function flippedPoints() {
+    const m = modelOf(state.points), Hq = squareHomography(orderRect(state.points));
+    if (!m || !Hq) return null;
+    const f = focalPx(), cx = state.W / 2, cy = state.H / 2;
+    // G : coordonnées du carré unité -> rayons caméra ; cône Q = G^-T Cs G^-1 (Cs : cercle inscrit)
+    const G = [0, 1, 2].map((r) => [0, 1, 2].map((j) => (r === 0 ? (Hq[0][j] - cx * Hq[2][j]) / f
+      : r === 1 ? (Hq[1][j] - cy * Hq[2][j]) / f : Hq[2][j])));
+    const gi = inv9(flat(G)), Gi = [[gi[0], gi[1], gi[2]], [gi[3], gi[4], gi[5]], [gi[6], gi[7], gi[8]]];
+    const Cs = [[1, 0, -0.5], [0, 1, -0.5], [-0.5, -0.5, 0.25]];
+    const mm = (A, B) => A.map((r) => [0, 1, 2].map((j) => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
+    const T = (A) => [0, 1, 2].map((i) => [A[0][i], A[1][i], A[2][i]]);
+    let Q = mm(mm(T(Gi), Cs), Gi);
+    let e = eigSym3(Q);
+    if (e.filter((x) => x.val > 0).length === 1) { Q = Q.map((r) => r.map((x) => -x)); e = e.map((x) => ({ val: -x.val, vec: x.vec })); }
+    e.sort((p, q) => q.val - p.val);
+    const [l1, l2, l3] = e.map((x) => x.val);
+    if (!(l1 > l2 && l2 > 0 && l3 < 0)) return null;           // disque vu de face : une seule inclinaison
+    const ka = Math.sqrt((l1 - l2) / (l1 - l3)), kb = Math.sqrt((l2 - l3) / (l1 - l3));
+    const cand = [1, -1].map((sg) => norm(add(scale(e[0].vec, sg * ka), scale(e[2].vec, kb))));
+    const cur = axesOf(m).n;
+    const n = Math.abs(dot(cand[0], cur)) < Math.abs(dot(cand[1], cur)) ? cand[0] : cand[1];
+    // section du cône par le plan n.X = 1 : centre et rayon du cercle
+    const qf = (X, Y) => dot(X, [0, 1, 2].map((i) => dot(Q[i], Y)));
+    const u = norm(cross(n, Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0])), v = cross(n, u);
+    const uu = qf(u, u), uv = qf(u, v), vv = qf(v, v), un = qf(u, n), vn = qf(v, n), det = uu * vv - uv * uv;
+    const s0 = (-un * vv + vn * uv) / det, t0 = (-vn * uu + un * uv) / det;
+    let C = add(n, add(scale(u, s0), scale(v, t0)));
+    const r = Math.sqrt(Math.max(0, -qf(C, C) / uu));
+    if (C[2] < 0) C = scale(C, -1);                              // section devant la caméra
+    let x = norm(sub(m.eu, scale(n, dot(m.eu, n))));
+    let y = cross(n, x);
+    if (dot(y, m.ev) < 0) y = scale(y, -1);
+    return cornersOf({ C, eu: scale(x, 2 * r), ev: scale(y, 2 * r) });
   }
 
   const ready = () => state.points.length === 4;
@@ -727,12 +785,12 @@
   // ------------------------------------------------------------------ annuler / rétablir
   function snapshot() {
     return {
-      points: state.points.map((p) => p.slice()), round: state.round.slice(), flip: state.flip, mode2d: state.mode2d,
+      points: state.points.map((p) => p.slice()), round: state.round.slice(), mode2d: state.mode2d,
       ref: state.ref, Hs: state.Hs, keys: state.keys, conf: state.conf, focal: $('in-focal').value, rev: state.rev,
     };
   }
   function sameSnap(a, b) {
-    const light = (s) => JSON.stringify([s.points, s.round, s.flip, s.mode2d, s.ref, s.focal, s.keys]);
+    const light = (s) => JSON.stringify([s.points, s.round, s.mode2d, s.ref, s.focal, s.keys]);
     return a.Hs === b.Hs && light(a) === light(b);
   }
   let pendingSnap = null;
@@ -757,7 +815,7 @@
   function restore(s) {
     const refMoved = s.ref !== state.ref;
     Object.assign(state, {
-      points: s.points.map((p) => p.slice()), round: s.round.slice(), flip: s.flip, mode2d: s.mode2d,
+      points: s.points.map((p) => p.slice()), round: s.round.slice(), mode2d: s.mode2d,
       ref: s.ref, Hs: s.Hs, keys: s.keys, conf: s.conf,
     });
     $('in-focal').value = s.focal;
@@ -1168,6 +1226,7 @@
     stopPlay();
     const [x, y] = canvasXY(ev);
     if (ev.button !== 0 || state.spaceKey || !editable()) {
+      if (state.spaceKey) state.spacePanned = true;
       state.drag = { kind: 'pan', x, y };
       canvas.classList.add('pan');
       return;
@@ -1203,7 +1262,6 @@
         const tl = Math.hypot(tx, ty);
         if (tl < 30 * DPR()) { const s = 30 * DPR() / (tl || 1); tx *= s; ty *= s; }  // anneau vu par la tranche
         d.tx = tx; d.ty = ty;
-        if (isDisc() && state.flip) state.flip = false;  // la rotation à la main remplace l'inversion
       } else if (h.kind === 'plane') { // glisser dans le plan de la surface (local) ou parallèle à l'image (monde)
         d.nrm = state.space === 'world' || state.mode2d ? [0, 0, 1] : g.ax.n;
         d.P0 = planePoint(toImage(x, y), d.nrm, g.m.C);
@@ -1247,8 +1305,6 @@
     const d = state.drag;
     if (d && d.kind === 'point') {
       const p = toImage(x, y);
-      p[0] = Math.max(0, Math.min(state.W, p[0]));
-      p[1] = Math.max(0, Math.min(state.H, p[1]));
       const shown = d.base.map((q) => q.slice());
       shown[d.i] = p;
       if (shown.length === 4) setShapeAt(shown); else state.points = shown;
@@ -1317,7 +1373,10 @@
     if (mod && (ev.key === 'z' || ev.key === 'Z')) { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
     if (mod && (ev.key === 'y' || ev.key === 'Y')) { ev.preventDefault(); redo(); return; }
     if (ev.target.tagName === 'INPUT' && ev.target !== keysink && ev.target.type !== 'checkbox') return;
-    if (ev.code === 'Space') { state.spaceKey = true; canvas.classList.add('pan'); ev.preventDefault(); }
+    if (ev.code === 'Space') {  // appui bref : lecture ; maintenu en glissant : déplacer la vue
+      if (!ev.repeat) state.spacePanned = false;
+      state.spaceKey = true; canvas.classList.add('pan'); ev.preventDefault();
+    }
     const k = ev.key.toLowerCase();
     if (!mod && (k === 'w' || k === 'e' || k === 'r')) { setXform({ w: 'move', e: 'rotate', r: 'scale' }[k]); ev.preventDefault(); }
     if (!mod && k === 'x') { setSpace(state.space === 'local' ? 'world' : 'local'); ev.preventDefault(); }
@@ -1347,7 +1406,11 @@
   keysink.addEventListener('input', () => { keysink.value = ''; });
 
   window.addEventListener('keyup', (ev) => {
-    if (ev.code === 'Space') { state.spaceKey = false; if (!state.drag) canvas.classList.remove('pan'); }
+    if (ev.code === 'Space') {
+      state.spaceKey = false;
+      if (!state.drag) canvas.classList.remove('pan');
+      if (!state.spacePanned && !state.tracking && state.n) $('btn-play').click();
+    }
   });
   window.addEventListener('resize', draw);
   if (inCEP) {
@@ -1372,7 +1435,7 @@
     act(() => { state.mode2d = b.dataset.dim === '2d'; });
     syncControls();
   }));
-  $('btn-flip').addEventListener('click', () => act(() => { state.flip = !state.flip; }));
+  $('btn-flip').addEventListener('click', () => { const p = flippedPoints(); if (p) act(() => { state.points = p; }); });
   const focalIn = $('in-focal');
   focalIn.addEventListener('focus', beginAction);
   focalIn.addEventListener('input', () => { beginAction(); state.rev++; refresh(); });
@@ -1404,7 +1467,6 @@
   function refresh() {
     const n = state.points.length, k = state.k, tracked = hasTrack();
     $('btn-flip').classList.toggle('hidden', !isDisc() || state.mode2d);
-    $('btn-flip').classList.toggle('on', state.flip);
     $('btn-undo').disabled = !state.undo.length || !!state.tracking;
     $('btn-redo').disabled = !state.redo.length || !!state.tracking;
     $('btn-clear-track').disabled = !tracked;
@@ -1556,10 +1618,17 @@
     }
     state.playDir = state.playBtn = dir;  // playBtn : bouton lancé (il affiche la pause)
     const fps = Math.min(30, (state.shot && state.shot.compFps) || 25);
+    // zone lue : la plage trackée s'il y a un tracking, sinon tout le calque
+    let lo = 0, hi = state.n - 1;
+    if (hasTrack() && ready()) {
+      const ks = Object.keys(usedHs()).map(Number);
+      lo = Math.min(...ks); hi = Math.max(...ks);
+    }
+    if (state.k < lo || state.k > hi) showFrame(state.k < lo ? lo : hi, { fast: true });
     state.playTimer = setInterval(() => {
-      if (state.n < 2) return;
+      if (hi <= lo) return;
       let k = state.k + state.playDir;
-      if (k < 0 || k >= state.n) { state.playDir = -state.playDir; k = state.k + state.playDir; }
+      if (k < lo || k > hi) { state.playDir = -state.playDir; k = state.k + state.playDir; }
       showFrame(k, { fast: true });
     }, 1000 / fps);
     refresh();

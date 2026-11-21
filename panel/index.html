@@ -108,13 +108,13 @@
       </div></div>
       <div class="grp"><div class="cap">Lecture <span id="frame-label" class="frame-label">—</span></div><div class="seg">
         <button id="btn-step-back" class="tool icon" title="Image précédente (←)">
-          <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+          <svg class="solid" viewBox="0 0 24 24"><path d="M5 6h2.5v12H5zM19 6v12l-10-6z"/></svg>
         </button>
-        <button id="btn-play" class="tool icon play" data-dir="1" title="Lecture / pause (aller-retour)">
+        <button id="btn-play" class="tool icon play" data-dir="1" title="Lecture / pause (Espace) : aller-retour, sur la zone trackée s'il y en a une">
           <svg class="solid" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></svg>
         </button>
         <button id="btn-step-fwd" class="tool icon" title="Image suivante (→)">
-          <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+          <svg class="solid" viewBox="0 0 24 24"><path d="M5 6v12l10-6zM16.5 6H19v12h-2.5z"/></svg>
         </button>
       </div></div>
       <span class="grow"></span>
@@ -160,6 +160,7 @@
         <li>Les boutons trackent en arrière ou en avant (une image, ou jusqu'à la clé voisine / au bout), ou dans les deux sens.</li>
         <li>Arrêtez (■) dès que la zone verte décroche : ce qui est déjà tracké est gardé.</li>
         <li>Le suivi part de la référence ou d'une image déjà trackée.</li>
+        <li>Dès qu'il y a un tracking, la lecture tourne sur la zone trackée seulement.</li>
       </ul>
       <h4>Clés</h4>
       <ul>
@@ -180,6 +181,7 @@
         <tr><td>← →</td><td>Image précédente / suivante (Maj : 10 images)</td></tr>
         <tr><td>⌘Z · ⇧⌘Z</td><td>Annuler · Rétablir</td></tr>
         <tr><td>Suppr</td><td>Retirer la clé de l'image</td></tr>
+        <tr><td>Espace</td><td>Lecture / pause</td></tr>
         <tr><td>Espace + glisser</td><td>Déplacer la vue (ou clic droit / molette-clic)</td></tr>
         <tr><td>Molette</td><td>Zoomer</td></tr>
         <tr><td>Double-clic</td><td>Recadrer la vue</td></tr>
