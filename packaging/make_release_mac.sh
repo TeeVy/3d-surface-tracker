@@ -31,5 +31,5 @@ chmod +x "$DIR/"*.command
 cp "$ROOT/packaging/README-release.txt" "$DIR/README.txt"
 cp "$ROOT/LICENSE" "$DIR/LICENSE.txt" 2>/dev/null || true
 # ditto garde les liens symboliques du moteur (Python.framework)
-(cd "$ROOT/out/release" && ditto -c -k --keepParent "$NAME" "$NAME.zip")
+(cd "$ROOT/out/release" && ditto -c -k --norsrc --noextattr --noqtn --keepParent "$NAME" "$NAME.zip")
 echo "Paquet : $DIR.zip ($(du -h "$DIR.zip" | cut -f1))"
