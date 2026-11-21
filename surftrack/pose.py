@@ -101,7 +101,7 @@ def estimate_aspect(corners, focal, width, height, valid=None):
     valid = np.ones(len(corners), bool) if valid is None else valid.copy()
     valid &= np.isfinite(corners).all(axis=(1, 2))  # images perdues exclues
     if not valid.any():
-        raise RuntimeError("Aucune image trackée exploitable pour estimer les proportions.")
+        raise RuntimeError("No usable tracked frame to estimate the proportions.")
     Hn = _unit_square_homographies(corners[valid], width / 2, height / 2)
     F = as_focals(focal, len(corners))[valid]
     d = np.column_stack([F, F, np.ones_like(F)])
@@ -137,7 +137,7 @@ def solve_poses(corners, focal, width, height, aspect, ref_index, valid=None):
 
     c = candidates(ref_index)
     if not c:
-        raise RuntimeError("Impossible de calculer la pose sur l'image de référence.")
+        raise RuntimeError("Cannot compute the pose on the reference frame.")
     R[ref_index], t[ref_index], err[ref_index] = min(c, key=lambda x: x[2])
 
     # continuité avec l'image voisine : lève l'ambiguïté des plans vus presque de face

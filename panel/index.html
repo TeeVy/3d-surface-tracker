@@ -11,11 +11,11 @@
   <!-- Calque chargé : nom + plage d'images ; aide et détails à droite -->
   <header>
     <div id="shot" class="shot">
-      <div id="shot-empty" class="dim">Aucun calque — appliquez l'effet « 3D Surface Tracker » à un calque, puis cliquez « Ouvrir le tracker ».</div>
+      <div id="shot-empty" class="dim" data-fr="Aucun calque — appliquez l'effet « 3D Surface Tracker » à un calque, puis cliquez « Open tracker ».">No layer — apply the “3D Surface Tracker” effect to a layer, then click “Open tracker”.</div>
       <div id="shot-info" class="hidden"></div>
     </div>
-    <button id="btn-details" class="link" title="Calque, résultat du tracking, journal">Détails</button>
-    <button id="btn-help" class="tool icon help" title="Aide">
+    <button id="btn-details" class="link" title="Layer, tracking result, log" data-fr-title="Calque, résultat du tracking, journal" data-fr="Détails">Details</button>
+    <button id="btn-help" class="tool icon help" title="Help" data-fr-title="Aide">
       <svg class="i512" viewBox="0 0 512 512"><path d="M77.3488 414.83C159.415 511.232 352.585 511.232 434.652 414.83C510.281 326.034 504.54 152.247 413.55 76.2512C332.032 8.1552 179.932 8.1552 98.4506 76.2512C7.46084 152.247 1.71912 326.034 77.3488 414.83Z"/><path d="M210.141 219.428H228.317C238.016 219.428 247.318 223.281 254.177 230.14C261.035 236.998 264.888 246.3 264.888 256V356.023M264.888 356.023H210.653M264.888 356.023H319.635M265.4 136.045V147.858"/></svg>
     </button>
   </header>
@@ -24,45 +24,45 @@
   <section id="s-surface" class="disabled">
     <div class="toolbar" id="toolbar">
       <div class="seg">
-        <button data-dim="2d" class="tool txt" title="2D : la surface reste face à la caméra (position, échelle, rotation dans l'image), comme un tracking 2D classique">2D</button>
-        <button data-dim="3d" class="tool txt on" title="3D : orientation complète de la surface">3D</button>
+        <button data-dim="2d" class="tool txt" title="2D: the surface stays facing the camera (position, scale, rotation in the image), like a classic 2D track" data-fr-title="2D : la surface reste face à la caméra (position, échelle, rotation dans l'image), comme un tracking 2D classique">2D</button>
+        <button data-dim="3d" class="tool txt on" title="3D: full orientation of the surface" data-fr-title="3D : orientation complète de la surface">3D</button>
       </div>
       <div class="seg">
-        <button data-xform="move" class="tool icon on" title="Déplacer (W)">
+        <button data-xform="move" class="tool icon on" title="Move (W)" data-fr-title="Déplacer (W)">
           <svg class="i96" viewBox="0 0 96 96"><path d="M48.0003 6.85742V48.0003M34.286 20.5717C34.286 15.4289 41.1431 8.57171 48.0003 6.85742C54.8574 8.57171 61.7146 15.4289 61.7146 20.5717M48.0003 48.0003V89.1431M48.0003 48.0003H6.85742M48.0003 48.0003H89.1431M34.286 75.4288C34.286 80.5717 41.1431 87.4288 48.0003 89.1431C54.8574 87.4288 61.7146 80.5717 61.7146 75.4288M20.5717 61.7146C15.4289 61.7146 8.57171 54.8574 6.85742 48.0003C8.57171 41.1431 15.4289 34.286 20.5717 34.286M75.4288 61.7146C80.5717 61.7146 87.4288 54.8574 89.1431 48.0003C87.4288 41.1431 80.5717 34.286 75.4288 34.286" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <button data-xform="rotate" class="tool icon" title="Tourner (E)">
+        <button data-xform="rotate" class="tool icon" title="Rotate (E)" data-fr-title="Tourner (E)">
           <svg class="i96" viewBox="0 0 96 96"><path d="M47.6771 6.85742V63.3397M47.6771 63.3397V89.1431M47.6771 63.3397C64.8199 63.3397 88.8199 58.286 88.8199 48.0003C88.8199 39.3877 71.8965 35.4654 64.8199 34.286M10.4359 41.4174C8.08391 43.214 6.52734 45.3946 6.52734 48.0003C6.52734 50.5374 7.98791 52.7523 10.4359 54.6517M30.5342 34.286C28.5799 34.6083 25.8851 35.1431 23.0051 35.9317M22.9982 60.206C26.5017 61.1489 30.0638 61.859 33.6611 62.3317" stroke-linecap="round" stroke-linejoin="round"/><path d="M71.3472 46.7793C68.2478 43.2959 65.7655 38.5645 64.8672 34.2582C67.7815 30.9462 72.2729 28.0593 76.6889 26.5645" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <button data-xform="scale" class="tool icon" title="Mettre à l'échelle (R)">
+        <button data-xform="scale" class="tool icon" title="Scale (R)" data-fr-title="Mettre à l'échelle (R)">
           <svg class="i96" viewBox="0 0 96 96"><path d="M67.412 6.46582C69.9492 6.74011 72.468 7.02582 74.9686 7.32296C78.1756 7.69869 81.1618 9.1464 83.4431 11.4315C85.7244 13.7165 87.1673 16.7051 87.5378 19.9127C87.8166 22.3904 88.0909 24.8932 88.3606 27.4212M26.1732 89.5332C23.636 89.259 21.1172 88.9732 18.6166 88.6761C15.4096 88.3004 12.4235 86.8527 10.1421 84.5676C7.86078 82.2825 6.41795 79.294 6.04747 76.0864L5.22461 68.5778" stroke-linecap="round"/><path d="M5.23242 27.8807C22.442 26.1549 39.7644 25.8476 57.0244 26.9618C60.1681 27.1637 63.1306 28.5036 65.358 30.7311C67.5855 32.9585 68.9254 35.921 69.1273 39.0647C70.2392 56.3249 69.9296 73.6472 68.2016 90.8567" stroke-linecap="round" stroke-linejoin="round"/><path d="M27.7986 5.14258C26.0729 22.3522 25.7656 39.6746 26.8798 56.9346C27.2981 63.4489 32.4683 68.6123 38.9826 69.0374C56.2489 70.1483 73.4878 69.8466 90.7746 68.1186" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
       </div>
       <div class="seg">
-        <button data-space="local" class="tool icon on" title="Axes locaux : le gizmo suit la surface (X)">
+        <button data-space="local" class="tool icon on" title="Local axes: the gizmo follows the surface (X)" data-fr-title="Axes locaux : le gizmo suit la surface (X)">
           <svg class="i96" viewBox="0 0 96 96"><path d="M48.0003 58.9694V8.81152M48.0003 58.9694L91.2003 83.911M48.0003 58.9694L4.8003 83.911M59.9454 19.6252C57.0037 15.1887 52.4986 11.0607 48.0003 8.81152C43.4952 11.0607 38.99 15.1887 36.0483 19.6252M75.854 88.8481C81.1752 88.519 86.9969 86.6881 91.2003 83.911C91.502 78.8847 90.1786 72.919 87.806 68.1532M20.1466 88.8481C14.8254 88.519 9.00372 86.6881 4.8003 83.911C4.49858 78.8847 5.82201 72.919 8.19458 68.1532" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <button data-space="world" class="tool icon" title="Axes du monde : le gizmo fait face à la caméra (X)">
+        <button data-space="world" class="tool icon" title="World axes: the gizmo faces the camera (X)" data-fr-title="Axes du monde : le gizmo fait face à la caméra (X)">
           <svg class="i96" viewBox="0 0 96 96"><path d="M48.0003 42.8572L34.286 49.7144V66.8572L48.0003 73.7144L61.7146 66.8572V49.7144L48.0003 42.8572ZM48.0003 42.8572V8.81152M59.9454 19.6252C57.0037 15.1887 52.4986 11.0607 48.0003 8.81152C43.4952 11.0607 38.99 15.1887 36.0483 19.6252M61.7146 66.8847L91.2003 83.911M75.854 88.8481C81.1752 88.519 86.9969 86.6881 91.2003 83.911C91.502 78.8847 90.1786 72.919 87.806 68.1532M34.286 66.8847L4.8003 83.911M20.1466 88.8481C14.8254 88.519 9.00372 86.6881 4.8003 83.911C4.49858 78.8847 5.82201 72.919 8.19458 68.1532" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
       </div>
-      <button id="btn-flip" class="tool icon hidden" title="Inverser l'inclinaison du disque">
+      <button id="btn-flip" class="tool icon hidden" title="Flip the disc's tilt" data-fr-title="Inverser l'inclinaison du disque">
         <svg viewBox="0 0 24 24"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg>
       </button>
       <span class="grow"></span>
-      <button id="btn-undo" class="tool icon" title="Annuler (⌘Z)" disabled>
+      <button id="btn-undo" class="tool icon" title="Undo (⌘Z)" data-fr-title="Annuler (⌘Z)" disabled>
         <svg class="i96" viewBox="0 0 96 96"><path d="M14.7578 41.0396C16.5198 31.8278 21.6497 23.6025 29.147 17.9678C36.6444 12.333 45.9718 9.69273 55.3102 10.5618C64.6486 11.4309 73.3285 15.7471 79.6573 22.6686C85.9861 29.5902 89.51 38.6208 89.5418 47.9996C89.5481 56.7962 86.4792 65.3183 80.8661 72.0914C75.2531 78.8645 67.449 83.4625 58.8042 85.0898C50.1593 86.717 41.2176 85.2712 33.5261 81.0025C25.8346 76.7338 19.8772 69.9107 16.6847 61.7138" stroke-linecap="round" stroke-linejoin="round"/><path d="M39.6829 33.325C32.6429 40.0359 24.3229 42.5867 14.7229 40.9776C8.01206 33.9376 5.4612 25.6176 7.07034 16.0176" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
-      <button id="btn-redo" class="tool icon" title="Rétablir (⇧⌘Z)" disabled>
+      <button id="btn-redo" class="tool icon" title="Redo (⇧⌘Z)" data-fr-title="Rétablir (⇧⌘Z)" disabled>
         <svg class="i96" viewBox="0 0 96 96"><path d="M81.2422 41.0396C79.4802 31.8278 74.3503 23.6025 66.853 17.9678C59.3556 12.333 50.0282 9.69273 40.6898 10.5618C31.3514 11.4309 22.6715 15.7471 16.3427 22.6686C10.0139 29.5902 6.48998 38.6208 6.45818 47.9996C6.45192 56.7962 9.52081 65.3183 15.1339 72.0914C20.7469 78.8645 28.551 83.4625 37.1958 85.0898C45.8407 86.717 54.7824 85.2712 62.4739 81.0025C70.1654 76.7338 76.1228 69.9107 79.3153 61.7138" stroke-linecap="round" stroke-linejoin="round"/><path d="M56.3171 33.325C63.3571 40.0359 71.6771 42.5867 81.2771 40.9776C87.9879 33.9376 90.5388 25.6176 88.9297 16.0176" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
       <div class="pop-wrap">
-        <button id="btn-clear" class="tool icon" title="Effacer…">
+        <button id="btn-clear" class="tool icon" title="Clear…" data-fr-title="Effacer…">
           <svg class="i96" viewBox="0 0 96 96"><path d="M13.714 40.457L16.3952 78.0342C16.8409 84.185 21.3323 89.3553 27.4489 90.1713C41.1631 92.009 54.8363 92.009 68.5506 90.1713C74.6672 89.3553 79.1586 84.185 79.6043 78.0342L82.2854 40.457M5.14258 23.8285H90.8569M30.8569 23.3142L34.1963 14.1256C35.2249 11.291 37.1018 8.84218 39.5716 7.1122C42.0415 5.38222 44.9843 4.45512 47.9997 4.45703C54.1712 4.45703 59.6911 8.31761 61.8031 14.1256L65.1426 23.3142" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <div id="clear-menu" class="pop hidden">
-          <button id="btn-clear-track" title="Garde la forme, efface le suivi et les clés">Effacer le suivi</button>
-          <button id="btn-clear-all" title="Efface la forme et le suivi">Tout effacer</button>
+          <button id="btn-clear-track" title="Keeps the shape, clears the tracking and keys" data-fr-title="Garde la forme, efface le suivi et les clés" data-fr="Effacer le suivi">Clear tracking</button>
+          <button id="btn-clear-all" title="Clears the shape and the tracking" data-fr-title="Efface la forme et le suivi" data-fr="Tout effacer">Clear all</button>
         </div>
       </div>
     </div>
@@ -70,122 +70,170 @@
     <div id="canvas-wrap">
       <canvas id="view"></canvas>
       <div id="badge" class="badge hidden"></div>
-      <div id="canvas-empty">L'image du calque s'affichera ici.</div>
+      <div id="canvas-empty" data-fr="L'image du calque s'affichera ici.">The layer's image will show here.</div>
       <div id="need-effect" class="need hidden">
         <div id="need-text"></div>
-        <button id="btn-add-effect" class="primary">Ajouter l'effet au calque</button>
+        <button id="btn-add-effect" class="primary" data-fr="Ajouter l'effet au calque">Add the effect to the layer</button>
       </div>
     </div>
 
     <div class="transport">
       <div class="grp"><div class="cap">Tracking</div><div class="seg">
-        <button id="btn-back-all" class="tool icon trk" data-dir="-1" data-count="0" title="Tracker en arrière, jusqu'à la clé précédente ou au début">
+        <button id="btn-back-all" class="tool icon trk" data-dir="-1" data-count="0" title="Track backward, up to the previous key or the start" data-fr-title="Tracker en arrière, jusqu'à la clé précédente ou au début">
           <svg class="solid" viewBox="0 0 24 24"><path d="M11.5 6v12L3 12zM21 6v12l-8.5-6z"/></svg>
         </button>
-        <button id="btn-back-1" class="tool icon trk" data-dir="-1" data-count="1" title="Tracker une image en arrière">
+        <button id="btn-back-1" class="tool icon trk" data-dir="-1" data-count="1" title="Track one frame backward" data-fr-title="Tracker une image en arrière">
           <svg class="solid" viewBox="0 0 24 24"><path d="M5 6h2.5v12H5zM19 6v12l-10-6z"/></svg>
         </button>
-        <button id="btn-both" class="tool icon trk" data-dir="0" data-count="0" title="Tracker en avant puis en arrière (jusqu'aux clés voisines)">
+        <button id="btn-both" class="tool icon trk" data-dir="0" data-count="0" title="Track forward then backward (up to the neighbouring keys)" data-fr-title="Tracker en avant puis en arrière (jusqu'aux clés voisines)">
           <svg class="solid" viewBox="0 0 24 24"><path d="M10 6v12l-8-6zM14 6v12l8-6z"/></svg>
         </button>
-        <button id="btn-fwd-1" class="tool icon trk" data-dir="1" data-count="1" title="Tracker une image en avant">
+        <button id="btn-fwd-1" class="tool icon trk" data-dir="1" data-count="1" title="Track one frame forward" data-fr-title="Tracker une image en avant">
           <svg class="solid" viewBox="0 0 24 24"><path d="M5 6v12l10-6zM16.5 6H19v12h-2.5z"/></svg>
         </button>
-        <button id="btn-fwd-all" class="tool icon trk" data-dir="1" data-count="0" title="Tracker en avant, jusqu'à la clé suivante ou à la fin">
+        <button id="btn-fwd-all" class="tool icon trk" data-dir="1" data-count="0" title="Track forward, up to the next key or the end" data-fr-title="Tracker en avant, jusqu'à la clé suivante ou à la fin">
           <svg class="solid" viewBox="0 0 24 24"><path d="M3 6v12l8.5-6zM12.5 6v12l8.5-6z"/></svg>
         </button>
       </div></div>
-      <div class="grp"><div class="cap">Clés</div><div class="seg">
-        <button id="btn-key-prev" class="tool icon" title="Clé précédente">
+      <div class="grp"><div class="cap" data-fr="Clés">Keys</div><div class="seg">
+        <button id="btn-key-prev" class="tool icon" title="Previous key" data-fr-title="Clé précédente">
           <svg viewBox="0 0 24 24"><path d="M15 6l6 6-6 6-6-6zM7 8l-4 4 4 4"/></svg>
         </button>
-        <button id="btn-key" class="tool icon" title="Clé">
+        <button id="btn-key" class="tool icon" title="Key">
           <svg viewBox="0 0 24 24"><path id="key-path" d="M12 4l8 8-8 8-8-8z"/></svg>
         </button>
-        <button id="btn-key-next" class="tool icon" title="Clé suivante">
+        <button id="btn-key-next" class="tool icon" title="Next key" data-fr-title="Clé suivante">
           <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6-6-6zM17 8l4 4-4 4"/></svg>
         </button>
       </div></div>
-      <div class="grp"><div class="cap">Lecture <span id="frame-label" class="frame-label">—</span></div><div class="seg">
-        <button id="btn-step-back" class="tool icon" title="Image précédente (←)">
+      <div class="grp"><div class="cap"><span data-fr="Lecture">Playback</span> <span id="frame-label" class="frame-label">—</span></div><div class="seg">
+        <button id="btn-step-back" class="tool icon" title="Previous frame (←)" data-fr-title="Image précédente (←)">
           <svg class="solid" viewBox="0 0 24 24"><path d="M5 6h2.5v12H5zM19 6v12l-10-6z"/></svg>
         </button>
-        <button id="btn-play" class="tool icon play" data-dir="1" title="Lecture / pause (Espace) : aller-retour, sur la zone trackée s'il y en a une">
+        <button id="btn-play" class="tool icon play" data-dir="1" title="Play / pause (Space): ping-pong, over the tracked range if there is one" data-fr-title="Lecture / pause (Espace) : aller-retour, sur la zone trackée s'il y en a une">
           <svg class="solid" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></svg>
         </button>
-        <button id="btn-step-fwd" class="tool icon" title="Image suivante (→)">
+        <button id="btn-step-fwd" class="tool icon" title="Next frame (→)" data-fr-title="Image suivante (→)">
           <svg class="solid" viewBox="0 0 24 24"><path d="M5 6v12l10-6zM16.5 6H19v12h-2.5z"/></svg>
         </button>
       </div></div>
       <span class="grow"></span>
-      <button id="btn-apply" class="primary" disabled title="Écrit le tracking dans l'effet du calque (images clés)">Appliquer le tracking</button>
+      <button id="btn-apply" class="primary" disabled title="Writes the tracking into the layer's effect (keyframes)" data-fr-title="Écrit le tracking dans l'effet du calque (images clés)" data-fr="Appliquer le tracking">Apply tracking</button>
     </div>
     <canvas id="timeline"></canvas>
 
     <!-- Focale : seulement si la vidéo n'a pas de métadonnées -->
     <div id="focal-wrap" class="focal hidden">
-      <span class="warn-text">Focale inconnue</span>
-      <input id="in-focal" type="number" min="5" max="1200" step="0.1" placeholder="mm (éq. 24x36)">
-      <span class="dim">sinon 50 mm</span>
+      <span class="warn-text" data-fr="Focale inconnue">Unknown focal length</span>
+      <input id="in-focal" type="number" min="5" max="1200" step="0.1" placeholder="mm (35mm equiv.)" data-fr-placeholder="mm (éq. 24x36)">
+      <span class="dim" data-fr="sinon 50 mm">default 50 mm</span>
     </div>
   </section>
 
   <!-- Détails : tout ce qui n'est pas utile en permanence -->
   <div id="sheet-details" class="sheet hidden">
     <div class="card">
-      <div class="card-head"><b>Détails</b><button class="close" title="Fermer (Échap)">×</button></div>
+      <div class="card-head"><b data-fr="Détails">Details</b><button class="close" title="Close (Esc)" data-fr-title="Fermer (Échap)">×</button></div>
       <div id="details-shot" class="dim"></div>
       <ul id="shot-warnings" class="warnings"></ul>
       <h4>Tracking</h4>
       <ul id="summary" class="summary"></ul>
-      <div id="summary-empty" class="dim">Pas encore de tracking.</div>
-      <h4>Journal</h4>
+      <div id="summary-empty" class="dim" data-fr="Pas encore de tracking.">No tracking yet.</div>
+      <h4 data-fr="Journal">Log</h4>
       <pre id="log"></pre>
     </div>
   </div>
 
-  <!-- Aide -->
+  <!-- Aide (deux blocs, un par langue) -->
   <div id="sheet-help" class="sheet hidden">
     <div class="card">
-      <div class="card-head"><b>Aide</b><button class="close" title="Fermer (Échap)">×</button></div>
-      <h4>Démarrer</h4>
-      <ul>
-        <li>Placez-vous sur une image nette où la surface est bien visible : elle devient la <b>référence</b>.</li>
-        <li>Cliquez les 4 coins de la surface. Retour arrière retire le dernier coin.</li>
-        <li>Coins et côtés se glissent ; les petits ronds jaunes arrondissent un coin (Maj : les 4 à la fois, double-clic : aucun arrondi).</li>
-        <li>2D : la surface reste face à la caméra (position, échelle, rotation), comme un tracking 2D classique. 3D : orientation complète.</li>
-      </ul>
-      <h4>Tracking</h4>
-      <ul>
-        <li>Les boutons trackent en arrière ou en avant (une image, ou jusqu'à la clé voisine / au bout), ou dans les deux sens.</li>
-        <li>Arrêtez (■) dès que la zone verte décroche : ce qui est déjà tracké est gardé.</li>
-        <li>Le suivi part de la référence ou d'une image déjà trackée.</li>
-        <li>Dès qu'il y a un tracking, la lecture tourne sur la zone trackée seulement.</li>
-      </ul>
-      <h4>Clés</h4>
-      <ul>
-        <li>Sur une image trackée, toute retouche de la forme pose une clé (◆) : la forme y est imposée et le suivi est corrigé jusqu'aux clés voisines.</li>
-        <li>Les clés servent aussi de modèles au tracker, qui dérive moins.</li>
-        <li>Pour retirer une clé : Suppr sur cette image, bouton ◆, ou clic droit sur son losange dans la timeline.</li>
-      </ul>
-      <h4>Appliquer</h4>
-      <ul>
-        <li>« Appliquer le tracking » écrit le résultat dans l'effet du calque. Rien n'est enregistré avant.</li>
-        <li>La grille s'affiche dans la compo quand l'effet est sélectionné ; sa section « Créer » ajoute caméra, null, texte, solide ou calque de forme. Ces calques lisent l'effet : un nouveau tracking appliqué les met à jour.</li>
-        <li>À la réouverture, le tracker retrouve le tracking et les clés depuis l'effet.</li>
-      </ul>
-      <h4>Raccourcis</h4>
-      <table class="keys">
-        <tr><td>W · E · R</td><td>Déplacer · Tourner · Mettre à l'échelle</td></tr>
-        <tr><td>X</td><td>Axes locaux / du monde</td></tr>
-        <tr><td>← →</td><td>Image précédente / suivante (Maj : 10 images)</td></tr>
-        <tr><td>⌘Z · ⇧⌘Z</td><td>Annuler · Rétablir</td></tr>
-        <tr><td>Suppr</td><td>Retirer la clé de l'image</td></tr>
-        <tr><td>Espace</td><td>Lecture / pause</td></tr>
-        <tr><td>Espace + glisser</td><td>Déplacer la vue (ou clic droit / molette-clic)</td></tr>
-        <tr><td>Molette</td><td>Zoomer</td></tr>
-        <tr><td>Double-clic</td><td>Recadrer la vue</td></tr>
-      </table>
+      <div class="card-head"><b data-fr="Aide">Help</b>
+        <span class="lang-switch"><button data-lang="en">English</button><button data-lang="fr">Français</button></span>
+        <button class="close" title="Close (Esc)" data-fr-title="Fermer (Échap)">×</button></div>
+      <div class="lang-en">
+        <h4>Getting started</h4>
+        <ul>
+          <li>Go to a sharp frame where the surface is clearly visible: it becomes the <b>reference</b>.</li>
+          <li>Click the 4 corners of the surface. Backspace removes the last corner.</li>
+          <li>Corners and edges can be dragged; the small yellow circles round a corner (Shift: all 4 at once, double-click: no rounding).</li>
+          <li>2D: the surface stays facing the camera (position, scale, rotation), like a classic 2D track. 3D: full orientation.</li>
+        </ul>
+        <h4>Tracking</h4>
+        <ul>
+          <li>The buttons track backward or forward (one frame, or up to the neighbouring key / the end), or both ways.</li>
+          <li>Stop (■) as soon as the green area slips: what is already tracked is kept.</li>
+          <li>Tracking starts from the reference or from an already tracked frame.</li>
+          <li>Once there is a track, playback loops over the tracked range only.</li>
+        </ul>
+        <h4>Keys</h4>
+        <ul>
+          <li>On a tracked frame, any edit of the shape sets a key (◆): the shape is enforced there and the track is corrected up to the neighbouring keys.</li>
+          <li>Keys also serve as templates for the tracker, which then drifts less.</li>
+          <li>To remove a key: Delete on that frame, the ◆ button, or right-click its diamond in the timeline.</li>
+        </ul>
+        <h4>Apply</h4>
+        <ul>
+          <li>“Apply tracking” writes the result into the layer's effect. Nothing is saved before that.</li>
+          <li>The grid shows in the comp when the effect is selected; its “Create” section adds a camera, null, text, solid or shape layer. These layers read the effect: applying a new track updates them.</li>
+          <li>When reopened, the tracker gets the tracking and keys back from the effect.</li>
+        </ul>
+        <h4>Shortcuts</h4>
+        <table class="keys">
+          <tr><td>W · E · R</td><td>Move · Rotate · Scale</td></tr>
+          <tr><td>X</td><td>Local / world axes</td></tr>
+          <tr><td>← →</td><td>Previous / next frame (Shift: 10 frames)</td></tr>
+          <tr><td>⌘Z · ⇧⌘Z</td><td>Undo · Redo</td></tr>
+          <tr><td>Delete</td><td>Remove the frame's key</td></tr>
+          <tr><td>Space</td><td>Play / pause</td></tr>
+          <tr><td>Space + drag</td><td>Pan the view (or right / middle click)</td></tr>
+          <tr><td>Wheel</td><td>Zoom</td></tr>
+          <tr><td>Double-click</td><td>Fit the view</td></tr>
+        </table>
+      </div>
+      <div class="lang-fr">
+        <h4>Démarrer</h4>
+        <ul>
+          <li>Placez-vous sur une image nette où la surface est bien visible : elle devient la <b>référence</b>.</li>
+          <li>Cliquez les 4 coins de la surface. Retour arrière retire le dernier coin.</li>
+          <li>Coins et côtés se glissent ; les petits ronds jaunes arrondissent un coin (Maj : les 4 à la fois, double-clic : aucun arrondi).</li>
+          <li>2D : la surface reste face à la caméra (position, échelle, rotation), comme un tracking 2D classique. 3D : orientation complète.</li>
+        </ul>
+        <h4>Tracking</h4>
+        <ul>
+          <li>Les boutons trackent en arrière ou en avant (une image, ou jusqu'à la clé voisine / au bout), ou dans les deux sens.</li>
+          <li>Arrêtez (■) dès que la zone verte décroche : ce qui est déjà tracké est gardé.</li>
+          <li>Le suivi part de la référence ou d'une image déjà trackée.</li>
+          <li>Dès qu'il y a un tracking, la lecture tourne sur la zone trackée seulement.</li>
+        </ul>
+        <h4>Clés</h4>
+        <ul>
+          <li>Sur une image trackée, toute retouche de la forme pose une clé (◆) : la forme y est imposée et le suivi est corrigé jusqu'aux clés voisines.</li>
+          <li>Les clés servent aussi de modèles au tracker, qui dérive moins.</li>
+          <li>Pour retirer une clé : Suppr sur cette image, bouton ◆, ou clic droit sur son losange dans la timeline.</li>
+        </ul>
+        <h4>Appliquer</h4>
+        <ul>
+          <li>« Apply tracking » écrit le résultat dans l'effet du calque. Rien n'est enregistré avant.</li>
+          <li>La grille s'affiche dans la compo quand l'effet est sélectionné ; sa section « Create » ajoute caméra, null, texte, solide ou calque de forme. Ces calques lisent l'effet : un nouveau tracking appliqué les met à jour.</li>
+          <li>À la réouverture, le tracker retrouve le tracking et les clés depuis l'effet.</li>
+        </ul>
+        <h4>Raccourcis</h4>
+        <table class="keys">
+          <tr><td>W · E · R</td><td>Déplacer · Tourner · Mettre à l'échelle</td></tr>
+          <tr><td>X</td><td>Axes locaux / du monde</td></tr>
+          <tr><td>← →</td><td>Image précédente / suivante (Maj : 10 images)</td></tr>
+          <tr><td>⌘Z · ⇧⌘Z</td><td>Annuler · Rétablir</td></tr>
+          <tr><td>Suppr</td><td>Retirer la clé de l'image</td></tr>
+          <tr><td>Espace</td><td>Lecture / pause</td></tr>
+          <tr><td>Espace + glisser</td><td>Déplacer la vue (ou clic droit / molette-clic)</td></tr>
+          <tr><td>Molette</td><td>Zoomer</td></tr>
+          <tr><td>Double-clic</td><td>Recadrer la vue</td></tr>
+        </table>
+      </div>
+      <div class="links">
+        <a href="https://github.com/TeeVy/3d-surface-tracker" data-ext>GitHub</a>
+        <a href="https://ko-fi.com/robincarlo" data-ext><span data-fr="Me soutenir sur Ko-fi">Support me on Ko-fi</span> ☕</a>
+      </div>
     </div>
   </div>
 

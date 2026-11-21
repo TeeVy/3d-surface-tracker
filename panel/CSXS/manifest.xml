@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.surftrack.panel" ExtensionBundleVersion="0.1.0"
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.surftrack.panel" ExtensionBundleVersion="1.0.0"
                    ExtensionBundleName="3D Surface Tracker" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.surftrack.panel.main" Version="0.1.0"/>
+    <Extension Id="com.surftrack.panel.main" Version="1.0.0"/>
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
@@ -31,7 +31,7 @@
         </Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>3D Surface Tracker (panneau)</Menu>
+          <Menu>3D Surface Tracker (panel)</Menu>
           <Geometry>
             <Size><Height>860</Height><Width>460</Width></Size>
             <MinSize><Height>420</Height><Width>320</Width></MinSize>

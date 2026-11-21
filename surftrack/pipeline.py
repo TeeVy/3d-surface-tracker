@@ -25,7 +25,7 @@ class Result:
     ref_corners: np.ndarray  # (4,2) coins de référence de la surface
     corners: np.ndarray    # (N,4,2) coins dans chaque image
     pose: object           # PoseResult
-    focal_source: str
+    focal_source: dict
     surface: object
     alternative: object = None  # disque ambigu : (pose, coins) avec l'inclinaison inversée
     conics: object = None       # disque : ellipse du bord suivie dans chaque image
@@ -129,33 +129,32 @@ def choose_focal(video, surface, track, W, H, focal_px=None, focal_mm=None, sens
             return [track.warp(c)[sub] for c in surface.candidates(f, W, H)]
         return [track.warp(surface.corners)[sub]]
 
+    # source : d'où vient la focale (le panneau l'affiche dans sa langue)
     if focal_px:
-        focal, source = focal_px, "saisie (px)"
+        focal, source = focal_px, {"kind": "input", "px": float(focal_px)}
     elif focal_mm:
-        focal, source = focal_mm / sensor_mm * max(W, H), f"saisie ({focal_mm:g} mm)"
+        focal, source = focal_mm / sensor_mm * max(W, H), {"kind": "input", "mm": float(focal_mm)}
     else:
         lens = _lens(video)
         if lens:
             focal = lens.focal_px_per_frame(W, H, int(src.max()) + 1)[src] * scale
             mm = (focal / scale / max(W, H) * 36.0)[ok] if ok.any() else focal / scale / max(W, H) * 36.0
+            source = {"kind": "metadata", "camera": lens.camera, "lens": lens.lens, "mm": float(lens.focal35_mm)}
             if lens.varies and np.ptp(mm) > 0.05:
-                source = (f"métadonnées {lens.camera} / {lens.lens} : zoom de {mm.min():.1f} à "
-                          f"{mm.max():.1f} mm éq. 35 mm, image par image")
-            else:
-                source = f"métadonnées {lens.camera} / {lens.lens} : {lens.focal35_mm:.1f} mm éq. 35 mm"
+                source.update(mm_min=float(mm.min()), mm_max=float(mm.max()))
         elif len(sub) >= 3:
             fe = estimate_focal(seqs_for, W, H)
             if fe.reliable:
-                focal, source = fe.focal, f"estimée (±{100 * fe.rel_uncertainty:.0f} %)"
+                focal, source = fe.focal, {"kind": "estimated", "uncertainty": float(fe.rel_uncertainty)}
             else:
                 focal = 50 / 36 * max(W, H)
-                source = "défaut 50 mm (pas assez de perspective pour l'estimer)"
+                source = {"kind": "default", "reason": "perspective"}
         else:
             focal = 50 / 36 * max(W, H)
-            source = "défaut 50 mm"
+            source = {"kind": "default"}
     focal = as_focals(focal, n)
-    log(f"Focale : {np.median(focal):.0f} px — {source}" if np.ptp(focal) < 1 else
-        f"Focale : {focal.min():.0f} à {focal.max():.0f} px — {source}")
+    log(f"Focal length: {np.median(focal):.0f} px ({source['kind']})" if np.ptp(focal) < 1 else
+        f"Focal length: {focal.min():.0f} to {focal.max():.0f} px ({source['kind']})")
     return focal, source
 
 
@@ -186,8 +185,8 @@ def solve(track, surface, W, H, focal, smooth=None, flip=False, normal_hint=None
                 conics[i], quality[i] = et.refine(frames_small[i], S @ track.homographies[i] @ Si)
         conics = np.array([S.T @ C @ S for C in conics])  # retour en pleine résolution
         track.confidence = np.minimum(track.confidence, quality)
-        log(f"Bord du disque suivi sur {100 * (quality[tracked] > 0).mean():.0f} % des images trackées "
-            f"(qualité moyenne {quality[tracked].mean():.2f})")
+        log(f"Disc edge followed on {100 * (quality[tracked] > 0).mean():.0f}% of the tracked frames "
+            f"(mean quality {quality[tracked].mean():.2f})")
 
         # 2 inclinaisons possibles. Le centre réel du disque n'est pas au centre de
         # l'ellipse, et ce décalage diffère entre les deux : on garde celle dont le
@@ -206,26 +205,25 @@ def solve(track, surface, W, H, focal, smooth=None, flip=False, normal_hint=None
             best = int(np.argmax([s[0].R[ref_frame][:, 2] @ hint for s in sols]))
             evidence = int(np.argmin(costs))
             if best != evidence and not ambiguous:
-                log("⚠ L'inclinaison choisie contredit nettement le mouvement observé : vérifiez l'aperçu.")
+                log("⚠ The chosen tilt clearly contradicts the observed motion: check the preview.")
             ambiguous = False
         else:
             best = int(np.argmin(costs)) ^ int(bool(flip))
         pose, corners = sols[best]
-        log(f"Inclinaison du disque : interprétation {'B' if best else 'A'} "
-            f"(écart des centres A {costs[0]:.2f} px / B {costs[1]:.2f} px)"
-            + (" — choisie dans le panneau" if normal_hint is not None else "")
-            + (" — inversée à la demande" if flip else ""))
+        log(f"Disc tilt: interpretation {'B' if best else 'A'} "
+            f"(center drift A {costs[0]:.2f} px / B {costs[1]:.2f} px)"
+            + (" — chosen in the panel" if normal_hint is not None else "")
+            + (" — flipped on request" if flip else ""))
         if ambiguous:
             alternative = sols[1 - best]
-            log("⚠ Inclinaison ambiguë (peu de perspective) : un second script avec l'inclinaison "
-                "inversée est aussi exporté.")
+            log("⚠ Ambiguous tilt (little perspective): the flipped interpretation is also available.")
         ref_corners = corners[ref_frame]
     else:
         ref_corners = surface.corners
         corners = track.warp(ref_corners)
         if aspect is None:
             aspect = estimate_aspect(corners, focal, W, H, tracked & (track.confidence >= 0.6))
-        log(f"Proportions de la surface : {aspect:.3f}")
+        log(f"Surface aspect ratio: {aspect:.3f}")
         pose = solve_poses(corners, focal, W, H, aspect, ref_frame, tracked)
     pose = stabilize_poses(pose, corners, W, H, smooth, conics)
     if surface.kind == "disc":  # coins virtuels du carré : ceux de la pose finale
@@ -234,8 +232,8 @@ def solve(track, surface, W, H, focal, smooth=None, flip=False, normal_hint=None
         alt_pose = stabilize_poses(alternative[0], alternative[1], W, H, smooth, conics)
         alternative = (alt_pose, project_corners(alt_pose, W, H))
     if pose.valid.any():
-        log(f"Écart 3D / tracking 2D ({'bord du disque' if surface.kind == 'disc' else 'coins'}) : "
-            f"moyenne {np.nanmean(pose.reproj_error[pose.valid]):.2f} px, "
+        log(f"3D vs 2D tracking error ({'disc edge' if surface.kind == 'disc' else 'corners'}): "
+            f"mean {np.nanmean(pose.reproj_error[pose.valid]):.2f} px, "
             f"max {np.nanmax(pose.reproj_error[pose.valid]):.2f} px")
     return dict(pose=pose, corners=corners, ref_corners=ref_corners, conics=conics, alternative=alternative)
 

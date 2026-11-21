@@ -27,6 +27,11 @@ function stJSON(v) {
 
 function stFail(msg) { return stJSON({ok: false, msg: msg}); }
 
+// Langue des messages (choisie dans le panneau) : T("english", "français").
+var ST_LANG = "en";
+function stSetLang(lang) { ST_LANG = lang === "fr" ? "fr" : "en"; return stJSON({ok: true}); }
+function T(en, fr) { return ST_LANG === "fr" ? fr : en; }
+
 function stNear(a, b, tol) { return Math.abs(a - b) <= tol; }
 
 var ST_MATCH = "SurfTrack 3D Surface Tracker";
@@ -44,8 +49,8 @@ function stIsVideoFootage(src) {
 // Calque désigné par le bouton de l'effet (compo, indice, instant ; instant < 0 : celui de la compo).
 function stGetLayer(compId, layerIndex, time) {
     var comp = stFindComp(compId);
-    if (!comp) return stFail("La composition du calque à tracker est introuvable.");
-    if (layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Le calque à tracker est introuvable.");
+    if (!comp) return stFail(T("The comp of the layer to track cannot be found.", "La composition du calque à tracker est introuvable."));
+    if (layerIndex < 1 || layerIndex > comp.numLayers) return stFail(T("The layer to track cannot be found.", "Le calque à tracker est introuvable."));
     return stDescribe(comp, comp.layer(layerIndex), time < 0 ? comp.time : time);
 }
 
@@ -76,9 +81,9 @@ function stLayerTime(L, t) {
 // Description du calque pour le panneau : images de la compo où il est visible, effet
 // tracker, rush pour la focale. Sans l'effet, le panneau propose de l'ajouter.
 function stDescribe(comp, sel, time) {
-    if (!(sel instanceof AVLayer) || !sel.source) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
+    if (!(sel instanceof AVLayer) || !sel.source) return stFail(T("Layer \u201c" + sel.name + "\u201d is neither a video nor a precomp.", "Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp."));
     var src = sel.source, isComp = src instanceof CompItem;
-    if (!isComp && !stIsVideoFootage(src)) return stFail("Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp.");
+    if (!isComp && !stIsVideoFootage(src)) return stFail(T("Layer \u201c" + sel.name + "\u201d is neither a video nor a precomp.", "Le calque « " + sel.name + " » n'est ni une vidéo ni un précomp."));
     var stFx = stTrackerEffect(sel);
     if (!stFx) {
         var par0 = sel.property("ADBE Effect Parade");
@@ -88,20 +93,8 @@ function stDescribe(comp, sel, time) {
     var warnings = [];
     var below = [], par = sel.property("ADBE Effect Parade");
     for (var e = stFx + 1; e <= par.numProperties; e++) if (par.property(e).active) below.push(par.property(e).name);
-    if (below.length) warnings.push("Effets placés sous « 3D Surface Tracker » (" + below.join(", ") + ") : le tracking ne les voit pas. Mettez le tracker en bas de la pile.");
-    var tr = sel.property("ADBE Transform Group");
-    var pos = tr.property("ADBE Position").value, anc = tr.property("ADBE Anchor Point").value;
-    var sc = tr.property("ADBE Scale").value, rot = tr.property("ADBE Rotate Z").value;
-    if (sel.threeDLayer || !stNear(rot, 0, 0.01) || sel.parent) {
-        warnings.push("« " + sel.name + " » est en 3D, tourné ou parenté : la surface ne sera pas calée correctement.");
-    }
-    var k = comp.width / src.width;
-    var Ax = sc[0] / 100, Ay = sc[1] / 100, Bx = pos[0] - Ax * anc[0], By = pos[1] - Ay * anc[1];
-    if (!stNear(Ax, k, 0.002 * k) || !stNear(Ay, k, 0.002 * k) || !stNear(Bx, 0, 1) || !stNear(By, 0, 1)) {
-        warnings.push("Le calque est déplacé ou mis à l'échelle dans la compo : la surface 3D sera décalée. " +
-                      "Il doit remplir la compo tel quel (précomposez-le si besoin).");
-    }
-
+    if (below.length) warnings.push(T("Effects below \u201c3D Surface Tracker\u201d (" + below.join(", ") + ") are not seen by the tracker. Move the tracker to the bottom of the stack.",
+                         "Effets placés sous « 3D Surface Tracker » (" + below.join(", ") + ") : le tracking ne les voit pas. Mettez le tracker en bas de la pile."));
     // Images de la compo où le calque est visible ; pour la focale, l'instant correspondant
     // dans la source du calque (remappage et étirement compris).
     var fd = comp.frameDuration, fps = isComp ? 1 / src.frameDuration : src.frameRate;
@@ -118,15 +111,17 @@ function stDescribe(comp, sel, time) {
     var a = 0, b = keys.length - 1;
     while (a <= b && keys[a] === null) a++;
     while (b >= a && keys[b] === null) b--;
-    if (a > b) return stFail("Le calque n'est visible sur aucune image de la composition.");
+    if (a > b) return stFail(T("The layer is not visible on any frame of the comp.", "Le calque n'est visible sur aucune image de la composition."));
     keys = keys.slice(a, b + 1);
     var seqStart = j0 + a;
     for (var q = 1; q < keys.length; q++) if (keys[q] === null) keys[q] = keys[q - 1];  // trou : image voisine
 
     var cur = Math.floor(time / fd + 1e-4) - seqStart;
     if (cur < 0 || cur >= keys.length) {
-        warnings.push("L'instant courant est hors de la partie visible du calque : la référence part de " +
-                      (cur < 0 ? "sa première" : "sa dernière") + " image. Choisissez-la dans la timeline du panneau.");
+        warnings.push(T("The current time is outside the visible part of the layer: the reference starts at its " +
+                        (cur < 0 ? "first" : "last") + " frame. Pick it in the panel's timeline.",
+                        "L'instant courant est hors de la partie visible du calque : la référence part de " +
+                        (cur < 0 ? "sa première" : "sa dernière") + " image. Choisissez-la dans la timeline du panneau."));
         cur = Math.min(keys.length - 1, Math.max(0, cur));
     }
     var times = [];
@@ -183,7 +178,7 @@ function stLensInside(comp, times) {
 // Place l'instant courant de la compo sur une de ses images (aperçu synchronisé).
 function stGoToFrame(compId, compFrame) {
     var comp = stFindComp(compId);
-    if (!comp) return stFail("Composition introuvable.");
+    if (!comp) return stFail(T("Comp not found.", "Composition introuvable."));
     comp.time = compFrame * comp.frameDuration;
     return stJSON({ok: true});
 }
@@ -191,12 +186,12 @@ function stGoToFrame(compId, compFrame) {
 // Ajoute l'effet au calque, en bas de la pile.
 function stAddTrackerEffect(compId, layerIndex) {
     var comp = stFindComp(compId);
-    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail("Calque introuvable.");
+    if (!comp || layerIndex < 1 || layerIndex > comp.numLayers) return stFail(T("Layer not found.", "Calque introuvable."));
     var par = comp.layer(layerIndex).property("ADBE Effect Parade");
     if (!par.canAddProperty(ST_MATCH)) {
-        return stFail("L'effet « 3D Surface Tracker » n'est pas installé (native/build.sh --install, puis redémarrer AE).");
+        return stFail(T("The \u201c3D Surface Tracker\u201d effect is not installed (see the README), then restart After Effects.", "L'effet « 3D Surface Tracker » n'est pas installé (voir le README), puis redémarrez After Effects."));
     }
-    app.beginUndoGroup("3D Surface Tracker : ajouter l'effet");
+    app.beginUndoGroup("3D Surface Tracker: add effect");
     par.addProperty(ST_MATCH);
     app.endUndoGroup();
     return stJSON({ok: true});
@@ -209,7 +204,7 @@ function stAddTrackerEffect(compId, layerIndex) {
 function stApplyTracking(compId, layerIndex, d) {
     var comp = stFindComp(compId);
     var fx = stTrackerFx(comp, layerIndex);
-    if (!fx) return stFail("L'effet « 3D Surface Tracker » est absent du calque.");
+    if (!fx) return stFail(T("The layer has no \u201c3D Surface Tracker\u201d effect.", "L'effet « 3D Surface Tracker » est absent du calque."));
     var fd = comp.frameDuration, times = [], i;
     for (i = 0; i < d.frames.length; i++) times.push(d.frames[i] * fd);
     function clear(p) { while (p.numKeys > 0) p.removeKey(1); }
@@ -222,28 +217,28 @@ function stApplyTracking(compId, layerIndex, d) {
     function still(name, v) { var p = fx.property(name); clear(p); p.setValue(v); }
     function col(a, j) { var o = []; for (var q = 0; q < a.length; q++) o.push(a[q][j]); return o; }
     var r = d.round || [0, 0, 0, 0];
-    app.beginUndoGroup("3D Surface Tracker : appliquer le tracking");
+    app.beginUndoGroup("3D Surface Tracker: apply tracking");
     keys("Position X", col(d.srfPos, 0));
     keys("Position Y", col(d.srfPos, 1));
     keys("Position Z", col(d.srfPos, 2));
     keys("Orientation X", col(d.srfOri, 0));
     keys("Orientation Y", col(d.srfOri, 1));
     keys("Orientation Z", col(d.srfOri, 2));
-    keys("Zoom caméra", d.zoom);
-    still("Largeur", d.size[0]);
-    still("Hauteur", d.size[1]);
-    still("Distance caméra", -d.camPos[0][2]);
-    fx.property("Forme").setValue(d.shape === "disc" ? 2 : 1);
-    still("Arrondi HG", 100 * r[0]);
-    still("Arrondi HD", 100 * r[1]);
-    still("Arrondi BD", 100 * r[2]);
-    still("Arrondi BG", 100 * r[3]);
+    keys("Camera zoom", d.zoom);
+    still("Width", d.size[0]);
+    still("Height", d.size[1]);
+    still("Camera distance", -d.camPos[0][2]);
+    fx.property("Shape").setValue(d.shape === "disc" ? 2 : 1);
+    still("Roundness TL", 100 * r[0]);
+    still("Roundness TR", 100 * r[1]);
+    still("Roundness BR", 100 * r[2]);
+    still("Roundness BL", 100 * r[3]);
     fx.property("Mode").setValue(d.mode2d ? 2 : 1);
-    still("Image de référence", d.refFrame);
+    still("Reference frame", d.refFrame);
     // clés de correction : à chaque clé, décalage des 4 coins par rapport au suivi brut (8 valeurs)
     var kt = [];
     for (i = 0; i < d.keyFrames.length; i++) kt.push(d.keyFrames[i] * fd);
-    var CN = ["HG", "HD", "BD", "BG"];
+    var CN = ["TL", "TR", "BR", "BL"];
     for (var c = 0; c < 8; c++) {
         var cp = fx.property("Correction " + CN[c >> 1] + (c % 2 ? " Y" : " X")), cv = [];
         clear(cp);
@@ -263,7 +258,7 @@ function stKeyFrames(p, fd) {
 
 // Correction de chaque clé (8 valeurs : décalage des coins HG, HD, BD, BG), dans l'ordre des clés.
 function stKeyDeltas(fx, keysProp) {
-    var CN = ["HG", "HD", "BD", "BG"], out = [];
+    var CN = ["TL", "TR", "BR", "BL"], out = [];
     for (var i = 1; i <= keysProp.numKeys; i++) {
         var t = keysProp.keyTime(i), row = [];
         for (var c = 0; c < 8; c++) row.push(fx.property("Correction " + CN[c >> 1] + (c % 2 ? " Y" : " X")).valueAtTime(t, false));
@@ -277,13 +272,13 @@ function stKeyDeltas(fx, keysProp) {
 function stReadTracking(compId, layerIndex) {
     var comp = stFindComp(compId);
     var fx = stTrackerFx(comp, layerIndex);
-    if (!fx) return stFail("L'effet « 3D Surface Tracker » est absent du calque.");
+    if (!fx) return stFail(T("The layer has no \u201c3D Surface Tracker\u201d effect.", "L'effet « 3D Surface Tracker » est absent du calque."));
     function v(name) { return fx.property(name).valueAtTime(0, false); }
-    if (v("Largeur") <= 0) return stJSON({ok: true, data: null});
+    if (v("Width") <= 0) return stJSON({ok: true, data: null});
     var fd = comp.frameDuration, px = fx.property("Position X"), times = [], i;
-    if (px.numKeys === 0) times.push(v("Image de référence") * fd);
+    if (px.numKeys === 0) times.push(v("Reference frame") * fd);
     for (i = 1; i <= px.numKeys; i++) times.push(px.keyTime(i));
-    var names = ["Position X", "Position Y", "Position Z", "Orientation X", "Orientation Y", "Orientation Z", "Zoom caméra"];
+    var names = ["Position X", "Position Y", "Position Z", "Orientation X", "Orientation Y", "Orientation Z", "Camera zoom"];
     var props = [];
     for (i = 0; i < names.length; i++) props.push(fx.property(names[i]));
     var frames = [];
@@ -293,10 +288,10 @@ function stReadTracking(compId, layerIndex) {
         frames.push(row);  // [image, px, py, pz, ox, oy, oz, zoom]
     }
     return stJSON({ok: true, data: {
-        frames: frames, size: [v("Largeur"), v("Hauteur")], dist: v("Distance caméra"),
-        disc: fx.property("Forme").value === 2, mode2d: fx.property("Mode").value === 2,
-        ref: Math.round(v("Image de référence")), keys: stKeyFrames(fx.property("Correction HG X"), fd),
-        keyDeltas: stKeyDeltas(fx, fx.property("Correction HG X")),
-        round: [v("Arrondi HG"), v("Arrondi HD"), v("Arrondi BD"), v("Arrondi BG")]
+        frames: frames, size: [v("Width"), v("Height")], dist: v("Camera distance"),
+        disc: fx.property("Shape").value === 2, mode2d: fx.property("Mode").value === 2,
+        ref: Math.round(v("Reference frame")), keys: stKeyFrames(fx.property("Correction TL X"), fd),
+        keyDeltas: stKeyDeltas(fx, fx.property("Correction TL X")),
+        round: [v("Roundness TL"), v("Roundness TR"), v("Roundness BR"), v("Roundness BL")]
     }});
 }

@@ -31,10 +31,22 @@
     if (p.indexOf('file://') === 0) p = p.substring(7);
     return p;
   }
-  const ROOT = inCEP ? path.dirname(fs.realpathSync(extensionDir())) : null; // dossier du projet
-  const PY = ROOT && path.join(ROOT, '.venv', 'bin', 'python');
-  const ENGINE = ROOT && path.join(ROOT, 'engine.py');
-  const APPDIR = inCEP ? path.join(os.homedir(), 'Library', 'Application Support', '3D Surface Tracker') : null;
+  const IS_WIN = typeof navigator !== 'undefined' && /Win/.test(navigator.platform);
+  const EXT = inCEP ? fs.realpathSync(extensionDir()) : null;   // dossier de l'extension (panel/)
+  const APPDIR = inCEP ? path.join(IS_WIN ? (nodeProcess.env.APPDATA || os.homedir())
+    : path.join(os.homedir(), 'Library', 'Application Support'), '3D Surface Tracker') : null;
+  const WORK = inCEP ? path.join(os.tmpdir(), '3D Surface Tracker') : null;  // vignettes de la session
+  /** Moteur de tracking : programme autonome livré avec l'extension (engine/), sinon, dans le
+   *  dépôt de développement, Python de .venv + engine.py. */
+  function engineCommand() {
+    const plat = IS_WIN ? 'win-x64' : `mac-${nodeProcess.arch === 'arm64' ? 'arm64' : 'x86_64'}`;
+    const exe = path.join(EXT, 'engine', plat, 'st-engine', IS_WIN ? 'st-engine.exe' : 'st-engine');
+    if (fs.existsSync(exe)) return { cmd: exe, args: [], cwd: path.dirname(exe) };
+    const root = path.dirname(EXT);
+    const py = path.join(root, '.venv', IS_WIN ? 'Scripts' : 'bin', IS_WIN ? 'python.exe' : 'python');
+    if (fs.existsSync(py)) return { cmd: py, args: [path.join(root, 'engine.py')], cwd: root };
+    return null;
+  }
   const I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
   const CORNERS = ['HG', 'HD', 'BD', 'BG'];
 
@@ -115,7 +127,7 @@
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error("Impossible d'afficher l'image : " + src));
+      img.onerror = () => reject(new Error(tr("Cannot display the image: ", "Impossible d'afficher l'image : ") + src));
       img.src = src;
     });
   }
@@ -123,15 +135,39 @@
   function remember(key, value) { try { localStorage.setItem('st.' + key, value); } catch (e) { /* indisponible */ } }
   function recall(key, dflt) { try { const v = localStorage.getItem('st.' + key); return v === null ? dflt : v; } catch (e) { return dflt; } }
 
+  // ------------------------------------------------------------------ langue (anglais par défaut, français au choix)
+  let lang = recall('lang', 'en') === 'fr' ? 'fr' : 'en';
+  /** Texte dans la langue choisie : tr("english", "français"). */
+  const tr = (en, fr) => (lang === 'fr' ? fr : en);
+  /** Textes fixes de la page : data-fr (texte), data-fr-title, data-fr-placeholder ; l'anglais est dans le HTML. */
+  function applyLang() {
+    document.body.dataset.lang = lang;
+    const keyNames = (t) => (IS_WIN ? t.replace(/⇧⌘/g, 'Ctrl+Shift+').replace(/⌘/g, 'Ctrl+') : t);
+    document.querySelectorAll('[data-fr]').forEach((el) => {
+      if (el.dataset.en === undefined) el.dataset.en = el.textContent;
+      el.textContent = lang === 'fr' ? el.dataset.fr : el.dataset.en;
+    });
+    document.querySelectorAll('[data-fr-title]').forEach((el) => {
+      if (el.dataset.enTitle === undefined) el.dataset.enTitle = el.title;
+      el.title = keyNames(lang === 'fr' ? el.dataset.frTitle : el.dataset.enTitle);
+    });
+    document.querySelectorAll('[data-fr-placeholder]').forEach((el) => {
+      if (el.dataset.enPlaceholder === undefined) el.dataset.enPlaceholder = el.placeholder;
+      el.placeholder = lang === 'fr' ? el.dataset.frPlaceholder : el.dataset.enPlaceholder;
+    });
+    if (IS_WIN) document.querySelectorAll('table.keys td:first-child').forEach((td) => { td.textContent = keyNames(td.textContent); });
+    document.querySelectorAll('[data-lang]').forEach((b) => b.classList.toggle('on', b.dataset.lang === lang));
+  }
+
   // ------------------------------------------------------------------ After Effects
   function host(fn, ...args) {
-    if (!inCEP) return Promise.resolve({ ok: false, msg: 'Hors d\'After Effects.' });
+    if (!inCEP) return Promise.resolve({ ok: false, msg: tr('Outside After Effects.', 'Hors d\'After Effects.') });
     // l'exception ExtendScript est renvoyée telle quelle (sinon CEP ne dit que « EvalScript error. »)
     const call = `try{${fn}(${args.map((a) => JSON.stringify(a)).join(',')})}catch(e){` +
       `stFail(e.toString()+" (${fn}, ligne "+e.line+")")}`;
     return new Promise((resolve) => {
       window.__adobe_cep__.evalScript(call, (r) => {
-        try { resolve(JSON.parse(r)); } catch (e) { resolve({ ok: false, msg: "Réponse inattendue d'After Effects : " + r }); }
+        try { resolve(JSON.parse(r)); } catch (e) { resolve({ ok: false, msg: tr("Unexpected answer from After Effects: ", "Réponse inattendue d'After Effects : ") + r }); }
       });
     });
   }
@@ -139,18 +175,20 @@
   // ------------------------------------------------------------------ moteur Python
   function pythonEnv() {
     const env = Object.assign({}, nodeProcess.env, { PYTHONUNBUFFERED: '1' });
-    // AE ne transmet pas le PATH du Terminal : on ajoute Homebrew pour ffmpeg (métadonnées caméra)
-    env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', env.PATH || '/usr/bin:/bin'].join(':');
+    // AE ne transmet pas le PATH du Terminal : on ajoute Homebrew pour ffmpeg (métadonnées caméra, facultatif)
+    if (!IS_WIN) env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', env.PATH || '/usr/bin:/bin'].join(':');
     return env;
   }
 
   /** Session du moteur : une ligne JSON par commande, réponses {type:'reply', id}. */
   function startEngine(seqPath, thumbsDir, onEvent) {
-    if (!fs.existsSync(PY)) {
-      throw new Error("Environnement Python introuvable :\n" + PY +
-        "\n\nDans le Terminal, depuis le dossier du projet :\n/usr/bin/python3 -m venv .venv && .venv/bin/pip install -r requirements.txt");
+    const ec = engineCommand();
+    if (!ec) {
+      throw new Error(tr('Tracking engine not found in the extension (engine folder): reinstall 3D Surface Tracker.',
+        'Moteur de tracking introuvable dans l\'extension (dossier engine) : réinstallez 3D Surface Tracker.'));
     }
-    const child = cp.spawn(PY, [ENGINE, 'session', seqPath, thumbsDir], { cwd: ROOT, env: pythonEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = cp.spawn(ec.cmd, ec.args.concat(['session', seqPath, thumbsDir]),
+      { cwd: ec.cwd, env: pythonEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const eng = { child, nextId: 1, waiters: new Map(), dead: false, onEvent };
     let buf = '', stderr = '';
     child.stdout.on('data', (d) => {
@@ -173,19 +211,19 @@
       }
     });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', (e) => toast('Impossible de lancer Python : ' + e.message));
+    child.on('error', (e) => toast(tr('Cannot start the tracking engine: ', 'Impossible de lancer le moteur de tracking : ') + e.message));
     child.on('close', (code) => {
       eng.dead = true;
-      eng.waiters.forEach((w) => w.reject(new Error(`Le moteur s'est arrêté (code ${code}).\n` + stderr.slice(-600))));
+      eng.waiters.forEach((w) => w.reject(new Error(tr(`The engine stopped (code ${code}).\n`, `Le moteur s'est arrêté (code ${code}).\n`) + stderr.slice(-600))));
       eng.waiters.clear();
       if (state.eng === eng && !eng.closing) {
-        toast(`Le moteur s'est arrêté (code ${code}).\n` + stderr.slice(-600));
+        toast(tr(`The engine stopped (code ${code}).\n`, `Le moteur s'est arrêté (code ${code}).\n`) + stderr.slice(-600));
         state.eng = null;
         refresh();
       }
     });
     eng.send = (cmd) => new Promise((resolve, reject) => {
-      if (eng.dead) { reject(new Error('Le moteur est arrêté : rechargez le calque.')); return; }
+      if (eng.dead) { reject(new Error(tr('The engine has stopped: reopen the tracker.', 'Le moteur est arrêté : rouvrez le tracker.'))); return; }
       const id = eng.nextId++;
       eng.waiters.set(id, { resolve, reject });
       child.stdin.write(JSON.stringify(Object.assign({ id }, cmd)) + '\n');
@@ -213,7 +251,7 @@
           setTimeout(tick, 40);
         };
         tick();
-      } else resolve({ poses: {}, size: [1, 1], kind: 'rect', focal_source: 'démo', error_mean: null, log: [] });
+      } else resolve({ poses: {}, size: [1, 1], kind: 'rect', focal_source: { kind: 'default' }, error_mean: null, log: [] });
     });
     eng.stop = () => { eng.stopFlag = true; };
     eng.close = () => {};
@@ -226,7 +264,7 @@
       ev.got.forEach((k) => { state.loaded.add(k); cacheThumb(k); });
       drawTimeline();
     } else if (ev.type === 'load_error') {
-      toast('Lecture des images interrompue : ' + ev.msg);
+      toast(tr('Frame loading interrupted: ', 'Lecture des images interrompue : ') + ev.msg);
     } else if (ev.type === 'tracked' && state.tracking) {
       state.Hs[ev.k] = ev.H;
       state.conf[ev.k] = ev.conf;
@@ -239,11 +277,13 @@
   /** Le pont After Effects (plug-in STBridge) répond-il ? */
   function bridgeAvailable() {
     return new Promise((resolve) => {
-      const sock = net.createConnection(path.join(APPDIR, 'bridge.sock'));
+      let info;
+      try { info = JSON.parse(fs.readFileSync(path.join(APPDIR, 'bridge.json'), 'utf8')); } catch (e) { resolve(false); return; }
+      const sock = net.createConnection({ host: '127.0.0.1', port: info.port });
       const done = (ok) => { try { sock.destroy(); } catch (e) { /* déjà fermé */ } resolve(ok); };
       sock.setTimeout(2000, () => done(false));
       sock.on('error', () => done(false));
-      sock.on('connect', () => sock.write('PING\n'));
+      sock.on('connect', () => sock.write(`AUTH ${info.token}\nPING\n`));
       sock.on('data', (d) => done(String(d).indexOf('OK') === 0));
     });
   }
@@ -285,13 +325,10 @@
     enable('s-surface', true);
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
-    $('shot-info').innerHTML = `<div class="line"><b>${escapeHtml(sel.layerName)}</b></div>`;
-    $('details-shot').textContent = `Compo « ${sel.compName} ».`;
+    state.needSel = sel;
+    shotTexts();
     $('shot-warnings').innerHTML = '';
     $('btn-details').classList.remove('warn');
-    $('need-text').textContent = "Ce calque n'a pas l'effet « 3D Surface Tracker ». C'est lui qui porte le tracking dans le projet : " +
-      "ajoutez-le tout en bas de la pile d'effets, il verra l'image avec les effets placés au-dessus (stabilisation…)." +
-      (sel.hasEffects ? '\n\nCe calque a déjà des effets : l\'effet tracker sera ajouté sous eux.' : '');
     $('need-effect').classList.remove('hidden');
     $('btn-add-effect').onclick = async () => {
       const r = await host('stAddTrackerEffect', sel.compId, sel.layerIndex);
@@ -299,6 +336,30 @@
       host('stGetLayer', sel.compId, sel.layerIndex, -1).then(loadShot);
     };
     refresh();
+  }
+
+  /** Textes de l'en-tête et des détails (refaits au changement de langue). */
+  function shotTexts() {
+    const sel = state.shot || state.needSel;
+    if (!sel) return;
+    if (!state.shot) {
+      $('shot-info').innerHTML = `<div class="line"><b>${escapeHtml(sel.layerName)}</b></div>`;
+      $('details-shot').textContent = tr(`Comp “${sel.compName}”.`, `Compo « ${sel.compName} ».`);
+      $('need-text').textContent = tr(
+        "This layer has no “3D Surface Tracker” effect. The effect holds the tracking in the project: " +
+        "add it at the very bottom of the effect stack, it sees the image with the effects above it (stabilization…)." +
+        (sel.hasEffects ? '\n\nThis layer already has effects: the tracker effect will be added below them.' : ''),
+        "Ce calque n'a pas l'effet « 3D Surface Tracker ». C'est lui qui porte le tracking dans le projet : " +
+        "ajoutez-le tout en bas de la pile d'effets, il verra l'image avec les effets placés au-dessus (stabilisation…)." +
+        (sel.hasEffects ? '\n\nCe calque a déjà des effets : l\'effet tracker sera ajouté sous eux.' : ''));
+      return;
+    }
+    const a = sel.seqStart, b = sel.seqStart + state.n - 1;
+    $('shot-info').innerHTML =
+      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> <span class="dim">· ${tr('frames', 'images')} ${a}–${b}</span></div>`;
+    $('details-shot').textContent = tr(
+      `Comp “${sel.compName}” · ${state.n} frames (${a}–${b}), as they reach the effect (with the effects above it).`,
+      `Compo « ${sel.compName} » · ${state.n} images (${a}–${b}), telles qu'elles arrivent à l'effet (avec les effets placés au-dessus).`);
   }
 
   async function loadShot(sel) {
@@ -311,27 +372,27 @@
     state.n = sel.times.length;
     state.k = state.ref = sel.cur;
     const stem = String(sel.layerName).replace(/[\/:]/g, '_').slice(0, 40);
-    state.workDir = path.join(ROOT, 'out', 'panel', `${stem}_${stamp()}`);
+    if (state.workDir) fs.rm(state.workDir, { recursive: true, force: true }, () => {});  // session précédente
+    state.workDir = path.join(WORK, `${stem}_${stamp()}`);
     state.thumbsDir = path.join(state.workDir, 'thumbs');
 
     $('shot-empty').classList.add('hidden');
     $('shot-info').classList.remove('hidden');
-    $('shot-info').innerHTML =
-      `<div class="line"><b>${escapeHtml(sel.layerName)}</b> <span class="dim">· images ${sel.seqStart}–${sel.seqStart + state.n - 1}</span></div>`;
-    $('details-shot').textContent = `Compo « ${sel.compName} » · ${state.n} images (${sel.seqStart}–${sel.seqStart + state.n - 1}), ` +
-      'telles qu\'elles arrivent à l\'effet (avec les effets placés au-dessus).';
+    state.needSel = null;
+    shotTexts();
     const w = $('shot-warnings');
     w.innerHTML = '';
     const note = (m, cls) => { const li = document.createElement('li'); li.textContent = m; if (cls) li.className = cls; w.appendChild(li); };
     sel.warnings.forEach((m) => note(m));
-    if (sel.retimed) note('Remappage temporel ou étirement pris en compte : le suivi porte sur les images telles que la compo les montre.', 'note');
+    if (sel.retimed) note(tr('Time remapping or stretch taken into account: tracking uses the frames as the comp shows them.', 'Remappage temporel ou étirement pris en compte : le suivi porte sur les images telles que la compo les montre.'), 'note');
     $('btn-details').classList.toggle('warn', sel.warnings.length > 0);  // avertissement à lire dans « Détails »
     $('summary').innerHTML = '';
     $('log').textContent = '';
 
     try {
       if (!(await bridgeAvailable())) {
-        throw new Error('Pont After Effects absent : installez les plug-ins (native/build.sh --install) puis redémarrez After Effects.');
+        throw new Error(tr('After Effects bridge not found: install the plug-ins (see the README), then restart After Effects.',
+          'Pont After Effects absent : installez les plug-ins (voir le README), puis redémarrez After Effects.'));
       }
       // tracking déjà appliqué : ses images sont chargées en premier (référence, puis la plage trackée)
       const rt = await host('stReadTracking', sel.compId, sel.layerIndex);
@@ -421,7 +482,7 @@
     if (!state.lensMm) $('in-focal').value = (refRow[7] / Math.max(W, H) * 36).toFixed(1);  // focale saisie à l'époque
     syncControls();
     changed();
-    log(`Tracking de l'effet repris : ${rows.length} images.`);
+    log(tr(`Tracking restored from the effect: ${rows.length} frames.`, `Tracking de l'effet repris : ${rows.length} images.`));
   }
 
   /** Orientation AE (degrés, R = Rx · Ry · Rz) -> matrice 3x3 à plat. */
@@ -1472,8 +1533,9 @@
     $('btn-clear-track').disabled = !tracked;
     $('btn-key').disabled = !!state.tracking || k === state.ref || !tracked || !effH(k);
     $('btn-key').classList.toggle('keyon', !!state.keys[k] || k === state.ref);
-    $('btn-key').title = k === state.ref ? 'Image de référence (clé d\'origine)' : state.keys[k] ? 'Retirer la clé de cette image (Suppr)'
-      : 'Poser une clé : fige la forme affichée sur cette image';
+    $('btn-key').title = k === state.ref ? tr('Reference frame (original key)', 'Image de référence (clé d\'origine)')
+      : state.keys[k] ? tr('Remove the key on this frame (Delete)', 'Retirer la clé de cette image (Suppr)')
+        : tr('Set a key: freezes the shape shown on this frame', 'Poser une clé : fige la forme affichée sur cette image');
     $('toolbar').classList.toggle('disabled', !!state.tracking);
 
     // suivi : possible depuis la référence ou une image déjà trackée
@@ -1487,7 +1549,7 @@
       if (b.dataset.mode !== mode) {
         b.dataset.mode = mode;
         b.innerHTML = running ? '<svg class="solid" viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></svg>' : b.dataset.icon;
-        b.title = running ? 'Arrêter le suivi (les images déjà trackées sont gardées)' : b.dataset.title;
+        b.title = running ? tr('Stop tracking (frames already tracked are kept)', 'Arrêter le suivi (les images déjà trackées sont gardées)') : b.dataset.title;
       }
     });
     const PAUSE = 'M7 5h3.5v14H7zM13.5 5H17v14h-3.5z';
@@ -1501,14 +1563,14 @@
     ['btn-step-back', 'btn-step-fwd'].forEach((id) => { $(id).disabled = !state.n || !!state.tracking; });
     $('btn-key-prev').disabled = !state.n || !!state.tracking || nextKey(k, -1) === null;
     $('btn-key-next').disabled = !state.n || !!state.tracking || nextKey(k, 1) === null;
-    if (state.shot) $('frame-label').textContent = `${state.shot.seqStart + k}` + (k === state.ref ? ' · réf' : '');
+    if (state.shot) $('frame-label').textContent = `${state.shot.seqStart + k}` + (k === state.ref ? tr(' · ref', ' · réf') : '');
     // seules indications affichées en permanence (le reste est dans l'aide)
-    const badge = state.tracking ? `Suivi… image ${state.shot.seqStart + k}`
-      : state.curThumbMissing ? 'Images en préparation…'
+    const badge = state.tracking ? tr(`Tracking… frame ${state.shot.seqStart + k}`, `Suivi… image ${state.shot.seqStart + k}`)
+      : state.curThumbMissing ? tr('Preparing frames…', 'Images en préparation…')
         : !state.cur ? ''
-          : (state.scrubbing && !tracked) ? 'Relâchez sur une image nette : elle devient la référence'
-            : (tracked && !shapeAt(k)) ? 'Non trackée'
-              : n < 4 ? `Cliquez les 4 coins de la surface (${n}/4)` : '';
+          : (state.scrubbing && !tracked) ? tr('Release on a sharp frame: it becomes the reference', 'Relâchez sur une image nette : elle devient la référence')
+            : (tracked && !shapeAt(k)) ? tr('Not tracked', 'Non trackée')
+              : n < 4 ? tr(`Click the 4 corners of the surface (${n}/4)`, `Cliquez les 4 coins de la surface (${n}/4)`) : '';
     $('badge').textContent = badge;
     $('badge').classList.toggle('hidden', !badge);
     $('btn-apply').disabled = !(state.pose && state.pose.ae && state.pose.rev === state.rev) || state.solving || !!state.tracking;
@@ -1673,7 +1735,7 @@
           anchors: state.keys,  // les clés servent aussi de modèles de recalage (anti-dérive)
         });
         if (r.reason === 'lost') {
-          toast(`Suivi perdu à l'image ${state.shot.seqStart + r.last + d} : corrigez la forme (clé) ou reprenez depuis une autre image.`, 5000);
+          toast(tr(`Track lost at frame ${state.shot.seqStart + r.last + d}: fix the shape (key) or resume from another frame.`, `Suivi perdu à l'image ${state.shot.seqStart + r.last + d} : corrigez la forme (clé) ou reprenez depuis une autre image.`), 5000);
           break;
         }
         if (r.reason === 'stop') break;
@@ -1737,11 +1799,23 @@
     const add = (cls, txt) => { const li = document.createElement('li'); li.className = cls; li.textContent = txt; ul.appendChild(li); };
     const keys = Object.keys(usedHs()).map(Number).sort((a, b) => a - b);
     const off = state.shot.seqStart, nk = Object.keys(state.keys).length;
-    add('ok', `${keys.length}/${state.n} images trackées (${off + keys[0]}–${off + keys[keys.length - 1]})` +
-      (nk ? `, ${nk} clé${nk > 1 ? 's' : ''} de correction` : '') + (state.mode2d ? ' · 2D' : ''));
-    if (!/métadonnées|saisie/.test(r.focal_source)) add('warn', `Focale : ${r.focal_source}`);
+    const range = `${off + keys[0]}–${off + keys[keys.length - 1]}`, s = nk > 1 ? 's' : '';
+    add('ok', tr(`${keys.length}/${state.n} frames tracked (${range})` + (nk ? `, ${nk} correction key${s}` : ''),
+      `${keys.length}/${state.n} images trackées (${range})` + (nk ? `, ${nk} clé${s} de correction` : '')) + (state.mode2d ? ' · 2D' : ''));
+    const fs = r.focal_source || {};
+    if (fs.kind === 'metadata') {
+      add('dim', tr('Focal length from the camera metadata', 'Focale lue dans les métadonnées de la caméra') +
+        ` (${fs.camera} / ${fs.lens}) : ` + (fs.mm_min ? `${fs.mm_min.toFixed(1)}–${fs.mm_max.toFixed(1)} mm` : `${fs.mm.toFixed(1)} mm`));
+    } else if (fs.kind === 'estimated') {
+      add('warn', tr(`Focal length estimated from the perspective (±${Math.round(100 * fs.uncertainty)} %)`,
+        `Focale estimée d'après la perspective (±${Math.round(100 * fs.uncertainty)} %)`));
+    } else if (fs.kind === 'default') {
+      add('warn', tr('Focal length unknown: 50 mm assumed', 'Focale inconnue : 50 mm par défaut') +
+        (fs.reason ? tr(' (not enough perspective to estimate it)', ' (pas assez de perspective pour l\'estimer)') : ''));
+    }
     if (r.error_mean !== null && r.error_mean !== undefined && !state.mode2d) {
-      add(r.error_mean < 1.5 ? 'ok' : 'warn', `Calage 3D sur la 2D : ${r.error_mean.toFixed(2)} px en moyenne (max ${r.error_max.toFixed(1)})`);
+      add(r.error_mean < 1.5 ? 'ok' : 'warn', tr(`3D fit on the 2D track: ${r.error_mean.toFixed(2)} px on average (max ${r.error_max.toFixed(1)})`,
+        `Calage 3D sur la 2D : ${r.error_mean.toFixed(2)} px en moyenne (max ${r.error_max.toFixed(1)})`));
     }
   }
 
@@ -1759,7 +1833,7 @@
     refresh();
     if (!out.ok) { toast(out.msg, 12000); log(out.msg); return; }
     // (pas de fermeture automatique : AE perd alors la trace du panneau, qui ne se rouvre plus)
-    toast(`Tracking appliqué (${out.frames} images clés). Vous pouvez fermer le panneau.`, 8000, 'ok');
+    toast(tr(`Tracking applied (${out.frames} keyframes). You can close the panel.`, `Tracking appliqué (${out.frames} images clés). Vous pouvez fermer le panneau.`), 8000, 'ok');
   });
 
   // ------------------------------------------------------------------ aide et détails
@@ -1779,13 +1853,31 @@
     if (ev.key === 'Escape') sheets.forEach((s) => $(s).classList.add('hidden'));
   });
 
+  // ------------------------------------------------------------------ langue et liens
+  document.querySelectorAll('[data-lang]').forEach((b) => b.addEventListener('click', () => {
+    lang = b.dataset.lang;
+    remember('lang', lang);
+    applyLang();
+    host('stSetLang', lang);
+    shotTexts();
+    showSummary();
+    refresh();
+  }));
+  document.querySelectorAll('a[data-ext]').forEach((a) => a.addEventListener('click', (ev) => {
+    ev.preventDefault();  // dans AE, ouvrir dans le navigateur (pas dans le panneau)
+    if (window.cep && window.cep.util) window.cep.util.openURLInDefaultBrowser(a.href);
+    else window.open(a.href, '_blank');
+  }));
+
   // ------------------------------------------------------------------ démarrage
+  applyLang();
+  host('stSetLang', lang);
   state.xform = recall('xform', 'move');
   state.space = recall('space', 'local');
   syncControls();
   if (!inCEP) {
     // aperçu dans un navigateur : moteur simulé, toutes les images = demo.jpg
-    $('shot-empty').textContent = 'Mode démo (hors After Effects) : suivi simulé.';
+    $('shot-empty').textContent = tr('Demo mode (outside After Effects): simulated tracking.', 'Mode démo (hors After Effects) : suivi simulé.');
     loadImg('demo.jpg').then((img) => {
       state.W = img.width; state.H = img.height; state.n = 60;
       state.shot = { seqStart: 0, compFps: 25 };
@@ -1798,9 +1890,19 @@
       refresh();
     }).catch(() => refresh());
   } else {
+    // vignettes laissées par d'anciennes sessions (plus d'un jour) : effacées
+    try {
+      fs.readdirSync(WORK).forEach((d) => {
+        const p = path.join(WORK, d);
+        if (Date.now() - fs.statSync(p).mtimeMs > 86400000) fs.rm(p, { recursive: true, force: true }, () => {});
+      });
+    } catch (e) { /* dossier absent */ }
     heartbeat();
     setInterval(heartbeat, 1000);
-    window.addEventListener('beforeunload', () => { if (state.eng) state.eng.close(); });
+    window.addEventListener('beforeunload', () => {
+      if (state.eng) state.eng.close();
+      if (state.workDir) try { fs.rmSync(state.workDir, { recursive: true, force: true }); } catch (e) { /* déjà parti */ }
+    });
     refresh();
   }
 })();

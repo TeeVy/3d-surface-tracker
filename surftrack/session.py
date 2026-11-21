@@ -57,7 +57,7 @@ def make_surface(c, for_pose=False):
     les 4 coins arrondis à fond font un disque (son bord donne l'inclinaison)."""
     pts = np.asarray(c["points"], float).reshape(-1, 2)
     if len(pts) != 4:
-        raise ValueError("La surface se désigne par exactement 4 coins.")
+        raise ValueError("The surface needs exactly 4 corners.")
     r = _radii(c)
     if for_pose and np.all(r >= 0.999):
         return DiscSurface.from_square(pts)
@@ -146,7 +146,7 @@ class Session:
         with self.cond:
             self.cond.notify_all()
         if self.load_error:
-            emit(type="log", msg="⚠ Lecture des images : " + self.load_error)
+            emit(type="log", msg="⚠ Frame loading: " + self.load_error)
             emit(type="load_error", msg=self.load_error)
 
     def frame(self, k):
@@ -154,7 +154,7 @@ class Session:
         with self.cond:
             while k not in self.gray:
                 if self.load_error:
-                    raise IOError(f"Image {k + self.seq_start} illisible : {self.load_error}")
+                    raise IOError(f"Frame {k + self.seq_start} unreadable: {self.load_error}")
                 self.cond.wait(0.5)
             return self.gray[k]
 
@@ -203,7 +203,7 @@ class Session:
             ratio = area / area_prev if area_prev > 0 else np.nan
             if not np.isfinite(ratio) or conf < 0.3 or not 1 / 1.5 < ratio < 1.5:
                 reason = "lost"
-                emit(type="log", msg=f"Suivi perdu sur l'image {i + self.seq_start} (confiance {conf:.2f}) : arrêt.")
+                emit(type="log", msg=f"Track lost at frame {i + self.seq_start} (confidence {conf:.2f}): stopped.")
                 break
             emit(type="tracked", k=i, H=np.round(self.Si @ H @ self.S, 9).ravel().tolist(), conf=round(float(conf), 3))
             dH = H @ np.linalg.inv(H_prev)
@@ -240,7 +240,7 @@ class Session:
             corners = track.warp(surf.corners)
             pose = solve_poses_2d(corners, focal, self.W, self.H, ref)
             sol = dict(pose=pose, corners=corners, ref_corners=surf.corners, conics=None)
-            log("Mode 2D : surface face à la caméra (position, échelle et rotation dans l'image).")
+            log("2D mode: surface facing the camera (position, scale and rotation in the image).")
         else:
             sol = solve(track, surf, self.W, self.H, focal, normal_hint=c.get("normal"), frames_small=_Frames(self),
                         track_scale=self.scale, log=log)

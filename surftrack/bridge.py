@@ -1,17 +1,27 @@
 """Client du pont After Effects (plug-in natif STBridge, voir native/STBridge).
 
 After Effects calcule l'image d'un calque juste avant un de ses effets, à un instant
-donné, et l'envoie en mémoire par une socket locale : pas de fichiers, pas de file de rendu.
+donné, et l'envoie en mémoire par une connexion locale (127.0.0.1) : pas de fichiers,
+pas de file de rendu. Le port et le jeton sont dans bridge.json, écrit par le pont.
 """
 
+import json
 import os
 import socket
+import sys
 from fractions import Fraction
 
 import numpy as np
 
-SOCK = os.environ.get("ST_BRIDGE_SOCK") or os.path.expanduser(
-    "~/Library/Application Support/3D Surface Tracker/bridge.sock")
+
+def info_path():
+    if os.environ.get("ST_BRIDGE_INFO"):
+        return os.environ["ST_BRIDGE_INFO"]
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    else:
+        base = os.path.expanduser("~/Library/Application Support")
+    return os.path.join(base, "3D Surface Tracker", "bridge.json")
 
 
 class BridgeError(IOError):
@@ -19,20 +29,22 @@ class BridgeError(IOError):
 
 
 class Bridge:
-    def __init__(self, path=SOCK, timeout=120.0):
-        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.s.settimeout(timeout)
+    def __init__(self, path=None, timeout=120.0):
         try:
-            self.s.connect(path)
-        except OSError as e:
-            raise BridgeError("Pont After Effects absent (plug-in STBridge non installé ou AE fermé).") from e
+            with open(path or info_path(), encoding="utf-8") as f:
+                info = json.load(f)
+            self.s = socket.create_connection(("127.0.0.1", int(info["port"])), timeout=timeout)
+            self.s.sendall(f"AUTH {info['token']}\n".encode())
+        except (OSError, ValueError, KeyError) as e:
+            raise BridgeError("After Effects bridge not found (STBridge plug-in not installed, or AE closed).") from e
+        self.s.settimeout(timeout)
         self.buf = b""
 
     def _line(self):
         while b"\n" not in self.buf:
             chunk = self.s.recv(65536)
             if not chunk:
-                raise BridgeError("Le pont After Effects a fermé la connexion.")
+                raise BridgeError("The After Effects bridge closed the connection.")
             self.buf += chunk
         line, self.buf = self.buf.split(b"\n", 1)
         return line.decode("utf-8", "replace")
@@ -43,7 +55,7 @@ class Bridge:
         while len(out) < n:
             chunk = self.s.recv(min(1 << 22, n - len(out)))
             if not chunk:
-                raise BridgeError("Image incomplète reçue du pont After Effects.")
+                raise BridgeError("Incomplete frame received from the After Effects bridge.")
             out += chunk
         return bytes(out)
 

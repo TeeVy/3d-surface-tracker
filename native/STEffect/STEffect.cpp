@@ -34,8 +34,10 @@
 #include <utility>
 #include <vector>
 
-#define MAJOR_VERSION 1
-#define MINOR_VERSION 9
+static constexpr double kPi = 3.14159265358979323846;  // M_PI n'existe pas sous MSVC
+
+#define MAJOR_VERSION 2
+#define MINOR_VERSION 0
 #define BUG_VERSION 0
 #define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 1
@@ -114,29 +116,29 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
     PF_Err err = PF_Err_NONE;
     PF_ParamDef def;
     AEFX_CLR_STRUCT(def);
-    PF_ADD_BUTTON("Tracker", "Ouvrir le tracker", 0, PF_ParamFlag_SUPERVISE, ID_OPEN);
+    PF_ADD_BUTTON("Tracker", "Open tracker", 0, PF_ParamFlag_SUPERVISE, ID_OPEN);
     AEFX_CLR_STRUCT(def);
-    PF_ADD_CHECKBOXX("Afficher la grille", TRUE, 0, ID_SHOW);
+    PF_ADD_CHECKBOXX("Show grid", TRUE, 0, ID_SHOW);
 
     AEFX_CLR_STRUCT(def);
     def.flags = PF_ParamFlag_START_COLLAPSED;
-    PF_ADD_TOPIC("Données du tracking", ID_DATA_START);
+    PF_ADD_TOPIC("Tracking data", ID_DATA_START);
     const char* names[] = {"Position X", "Position Y", "Position Z", "Orientation X", "Orientation Y", "Orientation Z",
-                           "Largeur", "Hauteur", "Zoom caméra", "Distance caméra"};
+                           "Width", "Height", "Camera zoom", "Camera distance"};
     const A_long ids[] = {ID_POS_X, ID_POS_Y, ID_POS_Z, ID_ORI_X, ID_ORI_Y, ID_ORI_Z,
                           ID_WIDTH, ID_HEIGHT, ID_ZOOM, ID_DIST};
     for (int i = 0; i < 10 && !err; i++) err = AddSlider(in_data, names[i], ids[i]);
     if (err) return err;
     AEFX_CLR_STRUCT(def);
-    PF_ADD_POPUP("Forme", 2, SHAPE_RECT, "Rectangle|Disque", ID_SHAPE);
-    const char* rnames[] = {"Arrondi HG", "Arrondi HD", "Arrondi BD", "Arrondi BG"};
+    PF_ADD_POPUP("Shape", 2, SHAPE_RECT, "Rectangle|Disc", ID_SHAPE);
+    const char* rnames[] = {"Roundness TL", "Roundness TR", "Roundness BR", "Roundness BL"};
     const A_long rids[] = {ID_R_HG, ID_R_HD, ID_R_BD, ID_R_BG};
     for (int i = 0; i < 4 && !err; i++) err = AddSlider(in_data, rnames[i], rids[i], 0, 100);
     if (err) return err;
     // pour rouvrir le tracker sur ce tracking : mode et image de référence (n° d'image de la compo)
     AEFX_CLR_STRUCT(def);
     PF_ADD_POPUP("Mode", 2, 1, "3D|2D", ID_MODE);
-    err = AddSlider(in_data, "Image de référence", ID_REF, 0, 1000000);
+    err = AddSlider(in_data, "Reference frame", ID_REF, 0, 1000000);
     if (err) return err;
     // clés de correction posées dans le tracker : une image clé par clé (et sur la référence) portant
     // le décalage des 4 coins (HG, HD, BD, BG) que la clé applique au suivi brut. Leurs instants
@@ -144,7 +146,7 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
     AEFX_CLR_STRUCT(def);
     def.flags = PF_ParamFlag_START_COLLAPSED;
     PF_ADD_TOPIC("Corrections", ID_CORR_START);
-    const char* corners[] = {"HG", "HD", "BD", "BG"};
+    const char* corners[] = {"TL", "TR", "BR", "BL"};
     for (int i = 0; i < 8 && !err; i++) {
         char name[32];
         std::snprintf(name, sizeof(name), "Correction %s %s", corners[i / 2], i % 2 ? "Y" : "X");
@@ -157,12 +159,12 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
     PF_END_TOPIC(ID_DATA_END);
 
     AEFX_CLR_STRUCT(def);
-    PF_ADD_TOPIC("Créer", ID_NEW_START);
+    PF_ADD_TOPIC("Create", ID_NEW_START);
     // calques à créer : caméra et null toujours (le null porte les images clés), texte et solide au choix
     struct { const char* name; A_long id; bool on, locked; } boxes[] = {
-        {"Caméra", ID_CHK_CAM, true, true}, {"Calque nul", ID_CHK_NULL, true, true},
-        {"Texte", ID_CHK_TEXT, false, false}, {"Solide", ID_CHK_SOLID, false, false},
-        {"Calque de forme", ID_CHK_SHAPE, false, false}};
+        {"Camera", ID_CHK_CAM, true, true}, {"Null", ID_CHK_NULL, true, true},
+        {"Text", ID_CHK_TEXT, false, false}, {"Solid", ID_CHK_SOLID, false, false},
+        {"Shape layer", ID_CHK_SHAPE, false, false}};
     for (auto& bx : boxes) {
         AEFX_CLR_STRUCT(def);
         def.param_type = PF_Param_CHECKBOX;
@@ -174,7 +176,7 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
         if ((err = PF_ADD_PARAM(in_data, -1, &def))) return err;
     }
     AEFX_CLR_STRUCT(def);
-    PF_ADD_BUTTON("", "Créer les calques", 0, PF_ParamFlag_SUPERVISE, ID_NEW_GO);
+    PF_ADD_BUTTON("", "Create layers", 0, PF_ParamFlag_SUPERVISE, ID_NEW_GO);
     AEFX_CLR_STRUCT(def);
     PF_END_TOPIC(ID_NEW_END);
 
@@ -211,7 +213,7 @@ void RoundedUnit(const double r[4], std::vector<double>& out)
     for (const auto& a : arcs) {
         if (a[0] <= 1e-6) { out.push_back(a[1]); out.push_back(a[2]); continue; }
         for (int k = 0; k < 8; k++) {
-            double t = (a[3] + 90.0 * k / 7) * M_PI / 180;
+            double t = (a[3] + 90.0 * k / 7) * kPi / 180;
             out.push_back(a[1] + a[0] * cos(t));
             out.push_back(a[2] + a[0] * sin(t));
         }
@@ -240,7 +242,7 @@ bool ReadPose(PF_InData* in_data, PF_ParamDef* params[], Pose& P)
     P.px = Val(params[ST_POS_X]);
     P.py = Val(params[ST_POS_Y]);
     P.pz = Val(params[ST_POS_Z]);
-    const double d = M_PI / 180;
+    const double d = kPi / 180;
     double a = Val(params[ST_ORI_X]) * d, b = Val(params[ST_ORI_Y]) * d, c = Val(params[ST_ORI_Z]) * d;
     // orientation AE : R = Rx · Ry · Rz
     double ca = cos(a), sa = sin(a), cb = cos(b), sb = sin(b), cc = cos(c), sc = sin(c);
@@ -258,7 +260,7 @@ bool ReadPose(PF_InData* in_data, PF_ParamDef* params[], Pose& P)
         }
     if (params[ST_SHAPE]->u.pd.value == SHAPE_DISC) {
         for (int i = 0; i < 48; i++) {
-            double t = 2 * M_PI * i / 48;
+            double t = 2 * kPi * i / 48;
             P.poly.push_back(0.5 + 0.5 * cos(t));
             P.poly.push_back(0.5 + 0.5 * sin(t));
         }
@@ -442,14 +444,14 @@ bool ScriptHead(PF_InData* in_data, std::string& head)
 const char* OPEN_SCRIPT = R"JSX(
 (function () {
     var TITLE = "3D Surface Tracker";
-    var MENU = "3D Surface Tracker (panneau)";  // différent du nom de l'effet, sinon AE applique l'effet
+    var MENU = "3D Surface Tracker (panel)";  // différent du nom de l'effet, sinon AE applique l'effet
     var comp = app.project.itemByID(ST_COMP);
     var dir = new Folder(Folder.userData.fsName + "/" + TITLE);
     if (!dir.exists) dir.create();
     var f = new File(dir.fsName + "/pending.json");
     f.encoding = "UTF-8";
     if (!f.open("w")) {
-        alert(TITLE + "\n\nActivez : Préférences > Scripts et expressions > « Autoriser les scripts à écrire des fichiers et à accéder au réseau ».");
+        alert(TITLE + "\n\nPlease enable: Settings > Scripting & Expressions > \u201cAllow Scripts to Write Files and Access Network\u201d.");
         return;
     }
     f.write('{"compId":' + ST_COMP + ',"layerIndex":' + ST_LAYER + ',"time":' + comp.time + ',"stamp":' + new Date().getTime() + '}');
@@ -462,7 +464,7 @@ const char* OPEN_SCRIPT = R"JSX(
     if (!isOpen) {
         var id = app.findMenuCommandId(MENU);
         if (id) app.executeCommand(id);
-        else alert(TITLE + "\n\nOuvrez le panneau : Fenêtre > Extensions > " + MENU + ".");
+        else alert(TITLE + "\n\nOpen the panel: Window > Extensions > " + MENU + ".");
     }
 })();
 )JSX";
@@ -497,8 +499,8 @@ const char* CREATE_SCRIPT = R"JSX(
         s.vertices = vs; s.inTangents = it; s.outTangents = ot; s.closed = true;
         return s;
     }
-    if (v("Largeur") <= 0) {
-        alert(TITLE + "\n\nAucun tracking appliqué : ouvrez le tracker, trackez, puis « Appliquer le tracking ».");
+    if (v("Width") <= 0) {
+        alert(TITLE + "\n\nNo tracking applied yet: open the tracker, track, then click \u201cApply tracking\u201d.");
         return;
     }
     // Les calques créés sont rattachés au calque tracké (null enfant du calque) : ses position, échelle
@@ -506,7 +508,7 @@ const char* CREATE_SCRIPT = R"JSX(
     // transformé. C'est exact tant que le centre de l'image tombe au centre de la compo (là où la
     // caméra d'AE vise) ; sinon, il faut précomposer.
     var T = L.property("ADBE Transform Group");
-    var why = L.threeDLayer ? "est un calque 3D" : L.parent ? "a un parent" : "";
+    var why = L.threeDLayer ? "is a 3D layer" : L.parent ? "has a parent" : "";
     if (!why) {
         var a = T.property("ADBE Anchor Point").valueAtTime(comp.time, false);
         var p = T.property("ADBE Position").valueAtTime(comp.time, false);
@@ -515,11 +517,11 @@ const char* CREATE_SCRIPT = R"JSX(
         var dx = (L.width / 2 - a[0]) * sc[0] / 100, dy = (L.height / 2 - a[1]) * sc[1] / 100;
         var cx = p[0] + dx * Math.cos(th) - dy * Math.sin(th), cy = p[1] + dx * Math.sin(th) + dy * Math.cos(th);
         if (Math.abs(cx - comp.width / 2) > 1 || Math.abs(cy - comp.height / 2) > 1)
-            why = "n'est pas centré dans la compo (le centre de son image doit tomber au centre de la compo)";
+            why = "is not centered in the comp (the center of its image must sit at the center of the comp)";
     }
     if (why) {
-        alert(TITLE + "\n\nLe calque tracké " + why + " : la caméra ne peut pas reproduire cette mise en place.\n\n" +
-              "Précomposez-le (le tracking suit dans la précomp), ou recentrez-le.");
+        alert(TITLE + "\n\nThe tracked layer " + why + ": the camera cannot reproduce this setup.\n\n" +
+              "Precompose it (the tracking moves into the precomp), or center it.");
         return;
     }
     var base = "ST " + L.name;
@@ -534,7 +536,7 @@ const char* CREATE_SCRIPT = R"JSX(
         return s;
     }
     function head(src) { return "var fx = " + src + ".effect(" + q(fx.name) + ");\n"; }  // src : le calque tracké
-    app.beginUndoGroup("3D Surface Tracker : créer les calques");
+    app.beginUndoGroup("3D Surface Tracker: create layers");
 
     // null au centre de la surface, enfant du calque tracké : position (pixels de l'image) et orientation de l'effet
     var nul = comp.layers.addNull();
@@ -549,17 +551,17 @@ const char* CREATE_SCRIPT = R"JSX(
     NT.property("ADBE Orientation").expression = head("parent") + '[fx("Orientation X"), fx("Orientation Y"), fx("Orientation Z")]';
 
     // caméra fixe, centrée, au-dessus du null ; son zoom suit celui de l'objectif
-    var cam = comp.layers.addCamera(unique(base + " Caméra"), [comp.width / 2, comp.height / 2]);
+    var cam = comp.layers.addCamera(unique(base + " Camera"), [comp.width / 2, comp.height / 2]);
     cam.moveBefore(nul);
     cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
     cam.property("ADBE Transform Group").property("ADBE Orientation").setValue([0, 0, 0]);
     var viaNull = head("thisComp.layer(" + q(nul.name) + ").parent");
     cam.property("ADBE Transform Group").property("ADBE Position").expression =
-        viaNull + '[thisComp.width / 2, thisComp.height / 2, -fx("Distance caméra")]';
-    cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom").expression = viaNull + 'fx("Zoom caméra")';
+        viaNull + '[thisComp.width / 2, thisComp.height / 2, -fx("Camera distance")]';
+    cam.property("ADBE Camera Options Group").property("ADBE Camera Zoom").expression = viaNull + 'fx("Camera zoom")';
 
     // texte, solide, forme : enfants du null, au centre de la surface (tailles en pixels de l'image)
-    var w = Math.max(4, Math.round(v("Largeur"))), h = Math.max(4, Math.round(v("Hauteur")));
+    var w = Math.max(4, Math.round(v("Width"))), h = Math.max(4, Math.round(v("Height")));
     function child(lay) {
         lay.threeDLayer = true;
         lay.moveBefore(L);
@@ -575,23 +577,23 @@ const char* CREATE_SCRIPT = R"JSX(
     // échelle : le calque (créé à w x h) suit Largeur et Hauteur de l'effet
     function fitSize(lay) {
         lay.property("ADBE Transform Group").property("ADBE Scale").expression = head("parent.parent") +
-            '[100 * fx("Largeur") / ' + w + ', 100 * fx("Hauteur") / ' + h + ', 100]';
+            '[100 * fx("Width") / ' + w + ', 100 * fx("Height") / ' + h + ', 100]';
     }
-    if (P("Solide").value) {
-        var sol = comp.layers.addSolid([0.15, 0.55, 1.0], unique(base + " Solide"), w, h, comp.pixelAspect);
+    if (P("Solid").value) {
+        var sol = comp.layers.addSolid([0.15, 0.55, 1.0], unique(base + " Solid"), w, h, comp.pixelAspect);
         sol.property("ADBE Transform Group").property("ADBE Opacity").setValue(60);
-        var r = P("Forme").value === 2 ? [1, 1, 1, 1]
-            : [v("Arrondi HG") / 100, v("Arrondi HD") / 100, v("Arrondi BD") / 100, v("Arrondi BG") / 100];
+        var r = P("Shape").value === 2 ? [1, 1, 1, 1]
+            : [v("Roundness TL") / 100, v("Roundness TR") / 100, v("Roundness BR") / 100, v("Roundness BL") / 100];
         var sh = roundedShape(w, h, r);
         if (sh) sol.property("ADBE Mask Parade").addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(sh);
         child(sol);
         fitSize(sol);
     }
-    if (P("Calque de forme").value) {  // tracé du contour de la surface, centré sur le null
+    if (P("Shape layer").value) {  // tracé du contour de la surface, centré sur le null
         var shl = comp.layers.addShape();
-        shl.name = unique(base + " Forme");
-        var rr = P("Forme").value === 2 ? [1, 1, 1, 1]
-            : [v("Arrondi HG") / 100, v("Arrondi HD") / 100, v("Arrondi BD") / 100, v("Arrondi BG") / 100];
+        shl.name = unique(base + " Shape");
+        var rr = P("Shape").value === 2 ? [1, 1, 1, 1]
+            : [v("Roundness TL") / 100, v("Roundness TR") / 100, v("Roundness BR") / 100, v("Roundness BL") / 100];
         var path = roundedShape(w, h, rr);
         if (!path) {
             path = new Shape();
@@ -614,9 +616,9 @@ const char* CREATE_SCRIPT = R"JSX(
         child(shl);
         fitSize(shl);
     }
-    if (P("Texte").value) {
-        var txt = comp.layers.addText("Texte");
-        txt.name = unique(base + " Texte");
+    if (P("Text").value) {
+        var txt = comp.layers.addText("Text");
+        txt.name = unique(base + " Text");
         var tp = txt.property("ADBE Text Properties").property("ADBE Text Document"), td = tp.value;
         td.fontSize = Math.max(6, Math.round(0.22 * Math.min(w, h)));
         td.fillColor = [1, 1, 1];
@@ -650,7 +652,7 @@ extern "C" DllExport PF_Err PluginDataEntryFunction2(PF_PluginDataPtr inPtr, PF_
 {
     PF_Err result = PF_Err_INVALID_CALLBACK;
     result = PF_REGISTER_EFFECT_EXT2(inPtr, inPluginDataCallBackPtr, "3D Surface Tracker", "SurfTrack 3D Surface Tracker",
-                                     "TeeVy", AE_RESERVED_INFO, "EffectMain", "https://github.com");
+                                     "TeeVy", AE_RESERVED_INFO, "EffectMain", "https://github.com/TeeVy/3d-surface-tracker");
     return result;
 }
 
@@ -661,7 +663,7 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data, PF_OutData* out_data, PF_Param
     try {
         switch (cmd) {
             case PF_Cmd_ABOUT:
-                PF_SPRINTF(out_data->return_msg, "3D Surface Tracker\rMarque le calque à tracker et ouvre le panneau.");
+                PF_SPRINTF(out_data->return_msg, "3D Surface Tracker\rPlanar surface tracker with 3D output, by TeeVy.\rhttps://github.com/TeeVy/3d-surface-tracker");
                 break;
             case PF_Cmd_GLOBAL_SETUP:
                 err = GlobalSetup(in_data, out_data);
