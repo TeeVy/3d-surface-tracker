@@ -124,3 +124,7 @@ synthetic videos.
 ## Support
 
 If this tool saves you time, you can [support me on Ko-fi](https://ko-fi.com/robincarlo) ☕
+
+## License
+
+[MIT](LICENSE). The After Effects SDK is not included and remains under Adobe's license.
